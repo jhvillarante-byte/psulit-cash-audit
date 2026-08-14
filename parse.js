@@ -147,4 +147,19 @@ function parseHiveEntry(text) {
   return { amount: parseFloat(match[1].replace(/,/g, '')) };
 }
 
-module.exports = { parseCashCount, parseTransaction, parseHiveEntry };
+/**
+ * Parses an expense entry (e.g. "Date: Aug 13, 2026\nAMOUNT: 4,500\nPurpose: ...").
+ * Every entry in this channel is an outflow that reduces the till's Opex float.
+ * Handles "100k" shorthand (= 100,000) alongside plain/comma'd numbers.
+ * Returns { amount } (always positive — caller applies it as a reduction) or null.
+ */
+function parseExpenseEntry(text) {
+  if (!text) return null;
+  const match = text.match(/amount\s*:?\s*([\d,]+\.?\d*)\s*(k)?/i);
+  if (!match) return null;
+  let amount = parseFloat(match[1].replace(/,/g, ''));
+  if (match[2]) amount *= 1000; // "100k" shorthand
+  return { amount };
+}
+
+module.exports = { parseCashCount, parseTransaction, parseHiveEntry, parseExpenseEntry };

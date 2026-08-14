@@ -1,7 +1,7 @@
 const express = require('express');
 const crypto = require('crypto');
 const axios = require('axios');
-const { parseCashCount, parseTransaction, parseHiveEntry } = require('./parse');
+const { parseCashCount, parseTransaction, parseHiveEntry, parseExpenseEntry } = require('./parse');
 const { reconcile } = require('./reconcile');
 const { history } = require('./slack');
 const { broadcast } = require('./telegram');
@@ -11,12 +11,12 @@ const app = express();
 const SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET;
 const RECIPIENT_CHAT_IDS = (process.env.TELEGRAM_CHAT_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
 
-// BRANCHES format: "BranchName:cashCountChannelId:transactionsChannelId:hiveChannelId,..."
-// hiveChannelId is optional — leave that segment blank if a branch has no Hive channel.
-// e.g. "Solaire:C0B734364T0:C0B75NZJFJ6:C0B8P9MM3BQ,Alphaland:C06NDDD1D0U:C06N4AWS878:"
+// BRANCHES format: "BranchName:cashCountChannelId:transactionsChannelId:hiveChannelId:expensesChannelId,..."
+// hiveChannelId and expensesChannelId are optional — leave blank if a branch doesn't use one.
+// e.g. "Solaire:C0B734364T0:C0B75NZJFJ6:C0B8P9MM3BQ:C09NGT3FP5J,Alphaland:C06NDDD1D0U:C06N4AWS878::"
 const BRANCHES = (process.env.BRANCHES || '').split(',').filter(Boolean).map(entry => {
-  const [name, cashCountChannelId, transactionsChannelId, hiveChannelId] = entry.split(':').map(s => (s || '').trim());
-  return { name, cashCountChannelId, transactionsChannelId, hiveChannelId: hiveChannelId || null };
+  const [name, cashCountChannelId, transactionsChannelId, hiveChannelId, expensesChannelId] = entry.split(':').map(s => (s || '').trim());
+  return { name, cashCountChannelId, transactionsChannelId, hiveChannelId: hiveChannelId || null, expensesChannelId: expensesChannelId || null };
 });
 const BY_CASH_COUNT_CHANNEL = new Map(BRANCHES.map(b => [b.cashCountChannelId, b]));
 const PROCESSED = new Set(); // dedupe Slack's at-least-once delivery retries
@@ -65,7 +65,7 @@ app.post('/slack/events', async (req, res) => {
 });
 
 async function handleCashCount(event, branchConfig) {
-  const { cashCountChannelId, transactionsChannelId, hiveChannelId } = branchConfig;
+  const { cashCountChannelId, transactionsChannelId, hiveChannelId, expensesChannelId } = branchConfig;
   const current = parseCashCount(event.text);
   if (!current) return;
   if (!isClosingCount(current)) return; // only report once per shift, at close-out
@@ -133,6 +133,14 @@ async function handleCashCount(event, branchConfig) {
       .filter(Boolean)
       .reduce((sum, entry) => sum + entry.amount, 0);
     if (hiveDelta !== 0) adjustments.Hive = hiveDelta;
+  }
+  if (expensesChannelId) {
+    const expenseMessages = await history(expensesChannelId, { oldest: windowStart, latest: event.ts });
+    const expenseTotal = expenseMessages
+      .map(m => parseExpenseEntry(m.text || ''))
+      .filter(Boolean)
+      .reduce((sum, entry) => sum + entry.amount, 0);
+    if (expenseTotal !== 0) adjustments.Opex = -expenseTotal; // every entry here is an outflow
   }
 
   const openingTotals = { ...previous.totals, ...previous.others };
