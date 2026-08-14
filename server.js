@@ -20,6 +20,12 @@ const BRANCHES = (process.env.BRANCHES || '').split(',').filter(Boolean).map(ent
 });
 const BY_CASH_COUNT_CHANNEL = new Map(BRANCHES.map(b => [b.cashCountChannelId, b]));
 const PROCESSED = new Set(); // dedupe Slack's at-least-once delivery retries
+// Tracks unresolved discrepancies per branch+currency, so we can note when a later
+// shift's count comes back in balance (i.e. the issue didn't recur / was corrected).
+// NOTE: this is in-memory only — it resets if the Render service restarts or redeploys.
+// A flag lost this way just reappears as "new" next time it's still off, so nothing breaks,
+// it just loses the "previously flagged" context for that one instance.
+const OPEN_FLAGS = new Map(); // key: `${branch}|${ccy}` -> { diff, shift, ts }
 
 // Slack requires the raw body to verify the request signature.
 app.use(express.json({
@@ -90,8 +96,34 @@ async function handleCashCount(event, branchConfig) {
   const openingTotals = { ...previous.totals, ...previous.others };
   const actualTotals = { ...current.totals, ...current.others };
   const results = reconcile(openingTotals, actualTotals, transactions);
+  const annotated = annotateWithFlagHistory(results, current);
 
-  await broadcast(RECIPIENT_CHAT_IDS, formatReport(current, results, transactions));
+  await broadcast(RECIPIENT_CHAT_IDS, formatReport(current, annotated, transactions));
+}
+
+// Compares this shift's results against any open flags from prior shifts for this branch.
+// Clears flags that reconciled, keeps/carries forward ones that didn't, and records new ones.
+function annotateWithFlagHistory(results, current) {
+  return results.map(r => {
+    const key = `${current.branch}|${r.ccy}`;
+    const priorFlag = OPEN_FLAGS.get(key);
+
+    if (r.match) {
+      if (priorFlag) {
+        OPEN_FLAGS.delete(key);
+        return { ...r, note: `resolved — was off by ${priorFlag.diff >= 0 ? '+' : ''}${priorFlag.diff.toFixed(2)} as of ${priorFlag.shift}, back in balance since.` };
+      }
+      return r;
+    }
+
+    // still a mismatch
+    if (priorFlag) {
+      OPEN_FLAGS.set(key, { diff: r.diff, shift: current.shift, ts: Date.now() });
+      return { ...r, note: `outstanding since ${priorFlag.shift} — not yet corrected.` };
+    }
+    OPEN_FLAGS.set(key, { diff: r.diff, shift: current.shift, ts: Date.now() });
+    return { ...r, note: 'newly flagged this shift.' };
+  });
 }
 
 function formatReport(current, results, transactions) {
@@ -106,9 +138,10 @@ function formatReport(current, results, transactions) {
   lines.push('');
 
   for (const r of results) {
-    const icon = r.match ? '✅' : '⚠️';
+    const icon = r.match ? (r.note ? '✅🔁' : '✅') : '⚠️';
     const diffStr = r.match ? '' : ` — off by ${formatNum(r.diff)}`;
     lines.push(`${icon} *${r.ccy}*: expected ${formatNum(r.expected)}, actual ${formatNum(r.actual)}${diffStr}`);
+    if (r.note) lines.push(`     _${r.note}_`);
   }
 
   lines.push('');
