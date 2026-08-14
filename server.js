@@ -197,6 +197,8 @@ function formatReport(current, results, transactions, badTransactions = [], morn
   let lines = [];
   const shiftLabel = current.shift === 'Mid-Shift' ? 'Morning and Mid-Shift' : current.shift;
   lines.push(`📊 *${current.branch} — ${shiftLabel} Cash Count*`);
+  const datePart = (current.timestamp || '').split(',')[0].trim(); // e.g. "08/14/2026" from "08/14/2026, 20:11:26"
+  if (datePart) lines.push(`Date: ${datePart}`);
   if (current.shift === 'Mid-Shift' && morningTeller) {
     lines.push(`Tellers: ${morningTeller} (Morning), ${current.teller || 'n/a'} (Mid-Shift)`);
   } else {
