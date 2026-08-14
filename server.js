@@ -46,7 +46,11 @@ app.post('/slack/events', async (req, res) => {
   res.status(200).send();
 
   const event = body.event;
-  if (!event || event.type !== 'message' || event.subtype || !event.text) return;
+  if (!event || event.type !== 'message' || !event.text) return;
+  // Reject edits/deletions/joins etc, but allow bot_message — cash count reports
+  // are posted by a bot, so filtering out all subtypes was silently dropping them.
+  if (event.subtype && event.subtype !== 'bot_message') return;
+  console.log(`Received message in ${event.channel} (subtype: ${event.subtype || 'none'}): ${event.text.slice(0, 60)}`);
   const branchConfig = BY_CASH_COUNT_CHANNEL.get(event.channel);
   if (!branchConfig) return; // message isn't in a channel we're watching
   if (!event.text.includes('PSULIT CASH COUNT REPORT')) return;
