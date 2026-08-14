@@ -1,5 +1,6 @@
 const express = require('express');
 const crypto = require('crypto');
+const axios = require('axios');
 const { parseCashCount, parseTransaction, parseHiveEntry } = require('./parse');
 const { reconcile } = require('./reconcile');
 const { history } = require('./slack');
@@ -188,3 +189,14 @@ app.get('/', (req, res) => res.send('Psulit Cash Audit is running.'));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Listening on port ${PORT}`));
+
+// Keep-alive: free-tier Render instances spin down after ~15 min of no traffic,
+// and Slack gives up on an event delivery if the server doesn't respond in time.
+// Pinging our own public URL every 10 minutes keeps the instance awake so real
+// Slack events never get dropped due to a cold start.
+const SELF_URL = process.env.RENDER_EXTERNAL_URL;
+if (SELF_URL) {
+  setInterval(() => {
+    axios.get(SELF_URL).catch(err => console.error('Keep-alive ping failed:', err.message));
+  }, 10 * 60 * 1000);
+}
