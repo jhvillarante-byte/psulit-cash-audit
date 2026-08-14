@@ -140,7 +140,7 @@ async function handleCashCount(event, branchConfig) {
       .map(m => parseExpenseEntry(m.text || ''))
       .filter(Boolean)
       .reduce((sum, entry) => sum + entry.amount, 0);
-    if (expenseTotal !== 0) adjustments.Opex = -expenseTotal; // every entry here is an outflow
+    if (expenseTotal !== 0) adjustments.Opex = expenseTotal;
   }
 
   const openingTotals = { ...previous.totals, ...previous.others };
@@ -205,11 +205,16 @@ function formatReport(current, results, transactions, badTransactions = [], morn
   lines.push(`${clientTx.length} client transaction(s)${wholesaleTx.length ? `, ${wholesaleTx.length} wholesale` : ''} checked since the last count.`);
   lines.push('');
 
-  for (const r of results) {
-    const icon = r.match ? (r.note ? '✅🔁' : '✅') : '⚠️';
-    const diffStr = r.match ? '' : ` — off by ${formatNum(r.diff)}`;
-    lines.push(`${icon} *${r.ccy}*: expected ${formatNum(r.expected)}, actual ${formatNum(r.actual)}${diffStr}`);
-    if (r.note) lines.push(`     _${r.note}_`);
+  const needsAttention = results.filter(r => !r.match || r.note);
+  if (needsAttention.length === 0) {
+    lines.push('✅ Everything reconciles — no discrepancies to report.');
+  } else {
+    for (const r of needsAttention) {
+      const icon = r.match ? '✅🔁' : '⚠️';
+      const diffStr = r.match ? '' : ` — off by ${formatNum(r.diff)}`;
+      lines.push(`${icon} *${r.ccy}*: expected ${formatNum(r.expected)}, actual ${formatNum(r.actual)}${diffStr}`);
+      if (r.note) lines.push(`     _${r.note}_`);
+    }
   }
 
   lines.push('');

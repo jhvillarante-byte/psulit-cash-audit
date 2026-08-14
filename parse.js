@@ -149,9 +149,10 @@ function parseHiveEntry(text) {
 
 /**
  * Parses an expense entry (e.g. "Date: Aug 13, 2026\nAMOUNT: 4,500\nPurpose: ...").
- * Every entry in this channel is an outflow that reduces the till's Opex float.
+ * Most entries are outflows that reduce the till's Opex float. An entry containing
+ * "TOP-UP" or "REPLENISH" is treated as money going the other way (added to Opex).
  * Handles "100k" shorthand (= 100,000) alongside plain/comma'd numbers.
- * Returns { amount } (always positive — caller applies it as a reduction) or null.
+ * Returns { amount } — already signed (negative = spent, positive = topped up) — or null.
  */
 function parseExpenseEntry(text) {
   if (!text) return null;
@@ -159,7 +160,8 @@ function parseExpenseEntry(text) {
   if (!match) return null;
   let amount = parseFloat(match[1].replace(/,/g, ''));
   if (match[2]) amount *= 1000; // "100k" shorthand
-  return { amount };
+  const isTopUp = /top[\s-]?up|replenish/i.test(text);
+  return { amount: isTopUp ? amount : -amount };
 }
 
 module.exports = { parseCashCount, parseTransaction, parseHiveEntry, parseExpenseEntry };
