@@ -68,13 +68,14 @@ async function handleCashCount(event, branchConfig) {
   const { cashCountChannelId, transactionsChannelId, hiveChannelId } = branchConfig;
   const current = parseCashCount(event.text);
   if (!current) return;
+  if (!isClosingCount(current)) return; // only report once per shift, at close-out
 
   // Find the previous cash count for the same branch, posted before this one.
   const priorMessages = await history(cashCountChannelId, { latest: subtractSecond(event.ts), limit: 50 });
   let previous = null;
   for (const msg of priorMessages) {
     const parsed = parseCashCount(msg.text || '');
-    if (parsed && parsed.branch === current.branch && parsed.shift === current.shift) {
+    if (parsed && parsed.branch === current.branch) {
       previous = { ...parsed, ts: msg.ts };
       break; // history() returns newest-first
     }
@@ -152,7 +153,7 @@ function formatReport(current, results, transactions, badTransactions = []) {
   const wholesaleTx = transactions.filter(t => t.isWholesale);
 
   let lines = [];
-  lines.push(`📊 *${current.branch} — ${current.shift} Shift Closed*`);
+  lines.push(`📊 *${current.branch} — ${current.shift} Cash Count*`);
   lines.push(`Teller: ${current.teller || 'n/a'}`);
   lines.push(`${clientTx.length} client transaction(s)${wholesaleTx.length ? `, ${wholesaleTx.length} wholesale` : ''} checked since the last count.`);
   lines.push('');
@@ -188,6 +189,38 @@ function formatNum(n) {
 
 function subtractSecond(ts) {
   return (parseFloat(ts) - 0.000001).toFixed(6);
+}
+
+// Solaire's reports (Morning/Mid-Shift/Night) don't explicitly say "opening" or
+// "closing" — each shift label is posted twice a day. Alphaland sometimes DOES
+// label it explicitly ("Shift: Closing"), so check that first. Otherwise, fall
+// back to a time-of-day window around each shift's scheduled end (per the real
+// schedule: Morning 9AM-6PM, Mid-Shift 11AM-8PM, Night 8PM-5AM).
+//
+// Morning and Mid-Shift overlap on one shared till, so Morning's own close is
+// skipped entirely — Mid-Shift's close already covers that same ground, and
+// splitting it into two reports would double up on the same cash movements.
+const SHIFT_END_HOUR = { 'Mid-Shift': 20, 'Night': 5 };
+const CLOSE_WINDOW_HOURS = 2; // tolerance either side of the scheduled end time
+
+function isClosingCount(current) {
+  if (!current.shift) return false;
+  if (current.shift === 'Morning') return false;
+  if (/close/i.test(current.shift)) return true; // explicit label (e.g. Alphaland "Closing")
+
+  const endHour = SHIFT_END_HOUR[current.shift];
+  if (endHour == null) return true; // unknown shift label — report it rather than silently drop it
+
+  const timeMatch = (current.timestamp || '').match(/(\d{1,2}):(\d{2}):(\d{2})/);
+  if (!timeMatch) return true; // can't parse timestamp — err toward reporting
+
+  const hour = parseInt(timeMatch[1], 10) + parseInt(timeMatch[2], 10) / 60;
+  // Handle the Night shift's end time (5 AM) wrapping past midnight.
+  const diff = Math.min(
+    Math.abs(hour - endHour),
+    24 - Math.abs(hour - endHour)
+  );
+  return diff <= CLOSE_WINDOW_HOURS;
 }
 
 function verifySlackSignature(req) {
