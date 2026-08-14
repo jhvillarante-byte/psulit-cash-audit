@@ -3,8 +3,9 @@
 Listens for every "PSULIT CASH COUNT REPORT" posted in Slack, across **all branches** (Solaire and Alphaland), on every shift (Morning, Mid-Shift, Night). The moment one lands, it:
 1. Finds the previous cash count for that same branch (the opening balance)
 2. Pulls all transactions posted since then in that branch's transactions channel
-3. Computes what each currency *should* total, compares to the actual count
-4. Sends the result as a **Telegram message to you (Jen)**
+3. Pulls any Hive balance-update entries posted since then in that branch's Hive channel (if configured) — Hive moves independently of forex tickets, so this prevents false alarms
+4. Computes what each currency *should* total, compares to the actual count
+5. Sends the result as a **Telegram message to you (Jen)**
 
 This runs standalone — it does **not** touch your existing Cash Count app, and doesn't post anything back into Slack (Nikki already covers that side).
 
@@ -31,17 +32,17 @@ Under **Subscribe to bot events**, add:
 
 Save changes, then **reinstall the app** to the workspace (Slack will prompt you).
 
-Finally, in Slack, invite the bot to all four channels (type as a message and send):
+Finally, in Slack, invite the bot to all channels you're using (type as a message and send):
 ```
 /invite @Psulit Cash Audit
 ```
-— run this in `#psulit-solaire-general`, `#psulit-solaire-forex-transaction`, `#psulit-alphaland-general`, and `#psulit-alphaland-transactions`.
+— run this in `#psulit-solaire-general`, `#psulit-solaire-forex-transaction`, `#psulit-alphaland-general`, `#psulit-alphaland-transactions`, and `#hive-psulit-solaire-transactions` (and Alphaland's Hive channel too, if you use one).
 
 *(Note: use `/invite` typed in the message box — the "Add Members" screen only searches for people, not bots.)*
 
 ## 2. Get your channel IDs
 
-In Slack: open the channel → channel name → scroll to the bottom of the details panel → copy the Channel ID. You'll need this for all four channels.
+In Slack: open the channel → channel name → scroll to the bottom of the details panel → copy the Channel ID. You'll need this for the cash count, transactions, and Hive channel of each branch.
 
 ## 3. Create the Telegram bot
 

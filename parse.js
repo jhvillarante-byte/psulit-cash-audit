@@ -119,4 +119,16 @@ function parseTransaction(text) {
   return { ref, action, ccy, fcyAmount, phpAmount, isWholesale, raw: text };
 }
 
-module.exports = { parseCashCount, parseTransaction };
+/**
+ * Parses a Hive balance-update message, e.g.:
+ *   "*Updated Balance (PHP)*\n*Amount: 100,000.00*"
+ * Returns { amount } (can be negative) or null if unparseable.
+ */
+function parseHiveEntry(text) {
+  if (!text || !text.includes('Updated Balance')) return null;
+  const match = text.match(/\*Amount:\s*(-?[\d,]+\.?\d*)\*/);
+  if (!match) return null;
+  return { amount: parseFloat(match[1].replace(/,/g, '')) };
+}
+
+module.exports = { parseCashCount, parseTransaction, parseHiveEntry };

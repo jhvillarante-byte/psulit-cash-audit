@@ -1,22 +1,21 @@
 const express = require('express');
 const crypto = require('crypto');
-const { parseCashCount, parseTransaction } = require('./parse');
+const { parseCashCount, parseTransaction, parseHiveEntry } = require('./parse');
 const { reconcile } = require('./reconcile');
 const { history } = require('./slack');
 const { broadcast } = require('./telegram');
 
 const app = express();
 
-const CASH_COUNT_CHANNEL_ID = process.env.CASH_COUNT_CHANNEL_ID; // #psulit-solaire-general
-const TRANSACTIONS_CHANNEL_ID = process.env.TRANSACTIONS_CHANNEL_ID; // #psulit-solaire-transactions
 const SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET;
 const RECIPIENT_CHAT_IDS = (process.env.TELEGRAM_CHAT_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
 
-// BRANCHES format: "BranchName:cashCountChannelId:transactionsChannelId,BranchName2:...:..."
-// e.g. "Solaire:C0B734364T0:C0XXXXXXX01,Alphaland:C0YYYYYYY00:C0YYYYYYY01"
+// BRANCHES format: "BranchName:cashCountChannelId:transactionsChannelId:hiveChannelId,..."
+// hiveChannelId is optional — leave that segment blank if a branch has no Hive channel.
+// e.g. "Solaire:C0B734364T0:C0B75NZJFJ6:C0B8P9MM3BQ,Alphaland:C06NDDD1D0U:C06N4AWS878:"
 const BRANCHES = (process.env.BRANCHES || '').split(',').filter(Boolean).map(entry => {
-  const [name, cashCountChannelId, transactionsChannelId] = entry.split(':').map(s => s.trim());
-  return { name, cashCountChannelId, transactionsChannelId };
+  const [name, cashCountChannelId, transactionsChannelId, hiveChannelId] = entry.split(':').map(s => (s || '').trim());
+  return { name, cashCountChannelId, transactionsChannelId, hiveChannelId: hiveChannelId || null };
 });
 const BY_CASH_COUNT_CHANNEL = new Map(BRANCHES.map(b => [b.cashCountChannelId, b]));
 const PROCESSED = new Set(); // dedupe Slack's at-least-once delivery retries
@@ -61,7 +60,7 @@ app.post('/slack/events', async (req, res) => {
 });
 
 async function handleCashCount(event, branchConfig) {
-  const { cashCountChannelId, transactionsChannelId } = branchConfig;
+  const { cashCountChannelId, transactionsChannelId, hiveChannelId } = branchConfig;
   const current = parseCashCount(event.text);
   if (!current) return;
 
@@ -93,9 +92,21 @@ async function handleCashCount(event, branchConfig) {
     .map(m => parseTransaction(m.text || ''))
     .filter(Boolean);
 
+  // Hive moves independently of forex tickets — sum any balance-update entries
+  // posted in the same window so they don't show up as unexplained mismatches.
+  let adjustments = {};
+  if (hiveChannelId) {
+    const hiveMessages = await history(hiveChannelId, { oldest: previous.ts, latest: event.ts });
+    const hiveDelta = hiveMessages
+      .map(m => parseHiveEntry(m.text || ''))
+      .filter(Boolean)
+      .reduce((sum, entry) => sum + entry.amount, 0);
+    if (hiveDelta !== 0) adjustments.Hive = hiveDelta;
+  }
+
   const openingTotals = { ...previous.totals, ...previous.others };
   const actualTotals = { ...current.totals, ...current.others };
-  const results = reconcile(openingTotals, actualTotals, transactions);
+  const results = reconcile(openingTotals, actualTotals, transactions, adjustments);
   const annotated = annotateWithFlagHistory(results, current);
 
   await broadcast(RECIPIENT_CHAT_IDS, formatReport(current, annotated, transactions));

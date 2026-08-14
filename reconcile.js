@@ -9,7 +9,7 @@
  * transactions: array from parse.parseTransaction (nulls filtered out)
  * opening / actual: totals objects from parse.parseCashCount, e.g. { USD: 123, PHP: 456.78, ... }
  */
-function reconcile(opening, actual, transactions) {
+function reconcile(opening, actual, transactions, adjustments = {}) {
   const expected = { ...opening };
   let phpDelta = 0;
 
@@ -22,6 +22,11 @@ function reconcile(opening, actual, transactions) {
     }
   }
   expected.PHP = (expected.PHP || 0) + phpDelta;
+
+  // Flat adjustments (e.g. Hive top-ups/withdrawals) apply directly, no buy/sell logic.
+  for (const [key, delta] of Object.entries(adjustments)) {
+    expected[key] = (expected[key] || 0) + delta;
+  }
 
   const allCcy = new Set([...Object.keys(expected), ...Object.keys(actual)]);
   const results = [];
