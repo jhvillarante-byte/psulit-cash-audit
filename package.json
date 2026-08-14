@@ -1,0 +1,13 @@
+{
+  "name": "psulit-cash-audit",
+  "version": "1.0.0",
+  "description": "Posts a transaction-vs-cash-count reconciliation as a thread reply on every Psulit Cash Count Slack message.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "axios": "^1.7.2"
+  }
+}
