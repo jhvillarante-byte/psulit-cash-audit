@@ -87,36 +87,52 @@ function matchOne(text, regex) {
 }
 
 /**
- * Parses a transaction ticket message (VN ##### or AR #####).
- * Returns { ref, action: 'BUY'|'SELL', ccy, fcyAmount, phpAmount, counterparty } or null if unparseable.
+ * Parses a transaction ticket message (VN #####, AR #####, or ARN #####).
+ * Handles both single-currency client tickets and multi-currency wholesale
+ * tickets (one message can list several BUY/SELL lines, one per currency).
+ *
+ * Returns { ref, isWholesale, movements: [{ action, ccy, fcyAmount }],
+ *           phpAmount, raw } or null if unparseable.
  */
 function parseTransaction(text) {
   if (!text) return null;
 
-  const refMatch = text.match(/(?:VN|AR)\s*#?\s*0*(\d+)/i);
+  // Ticket prefix: check ARN before AR, since "ARN" also contains "AR" as a substring.
+  const refMatch = text.match(/(?:VN|ARN|AR)\s*#?\s*0*(\d+)/i);
   if (!refMatch) return null;
   const ref = refMatch[1];
 
-  const actionMatch = text.match(/\b(BUY|SELL)\b/i);
-  if (!actionMatch) return null;
-  const action = actionMatch[1].toUpperCase();
+  // Every BUY/SELL <amount> <CCY> line in the message — wholesale tickets often
+  // list several currencies in one post (e.g. a multi-currency Sun Forex deal).
+  const movements = [];
+  const lineRegex = /\b(BUY|SELL)\s*([\d,]+)\s*([A-Z]{3})\b/gi;
+  let m;
+  while ((m = lineRegex.exec(text)) !== null) {
+    movements.push({
+      action: m[1].toUpperCase(),
+      ccy: m[3].toUpperCase(),
+      fcyAmount: parseFloat(m[2].replace(/,/g, ''))
+    });
+  }
+  if (movements.length === 0) return null;
 
-  // e.g. "BUY 1000 USD@61.11" / "BUY 300  USD @ 61.16" / "SELL 21,000 USD @ 61.30" / "BUY 7000JPY @0.3749"
-  const fcyMatch = text.match(/\b(?:BUY|SELL)\s*([\d,]+)\s*([A-Z]{3})\b/i);
-  if (!fcyMatch) return null;
-  const fcyAmount = parseFloat(fcyMatch[1].replace(/,/g, ''));
-  const ccy = fcyMatch[2].toUpperCase();
-
-  // PHP value is the last ₱/P-prefixed number in the message, or the value after "="
-  const phpMatches = [...text.matchAll(/(?:₱|=\s*)\s*([\d,]+\.?\d*)/g)];
-  const phpAmount = phpMatches.length
-    ? parseFloat(phpMatches[phpMatches.length - 1][1].replace(/,/g, ''))
-    : null;
+  // Overall PHP value: prefer an explicit "TOTAL" line (used on multi-currency
+  // tickets), otherwise fall back to the last ₱/= amount in the message.
+  const totalMatch = text.match(/TOTAL\s*:?\s*[₱P]?\s*([\d,]+\.?\d*)/i);
+  let phpAmount = null;
+  if (totalMatch) {
+    phpAmount = parseFloat(totalMatch[1].replace(/,/g, ''));
+  } else {
+    const phpMatches = [...text.matchAll(/(?:₱|=\s*)\s*([\d,]+\.?\d*)/g)];
+    if (phpMatches.length) {
+      phpAmount = parseFloat(phpMatches[phpMatches.length - 1][1].replace(/,/g, ''));
+    }
+  }
 
   const isWholesale = /CORPORATION|FOREX|EXCHANGE|CZARINA|SUNFOREX|MONEYBEES/i.test(text)
     && !/NEW CLIENT|OLD CLIENT/i.test(text);
 
-  return { ref, action, ccy, fcyAmount, phpAmount, isWholesale, raw: text };
+  return { ref, isWholesale, movements, phpAmount, raw: text };
 }
 
 /**

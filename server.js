@@ -74,7 +74,7 @@ async function handleCashCount(event, branchConfig) {
   let previous = null;
   for (const msg of priorMessages) {
     const parsed = parseCashCount(msg.text || '');
-    if (parsed && parsed.branch === current.branch) {
+    if (parsed && parsed.branch === current.branch && parsed.shift === current.shift) {
       previous = { ...parsed, ts: msg.ts };
       break; // history() returns newest-first
     }
@@ -94,8 +94,12 @@ async function handleCashCount(event, branchConfig) {
     latest: event.ts
   });
   const transactions = txMessages
-    .map(m => parseTransaction(m.text || ''))
-    .filter(Boolean);
+    .map(m => ({ parsed: parseTransaction(m.text || ''), raw: m.text || '' }))
+    .filter(x => x.raw.match(/(?:VN|ARN|AR)\s*#?\s*0*\d+/i)) // looks like a ticket at all
+    .map(x => x.parsed ? x.parsed : { unparseable: true, raw: x.raw });
+
+  const goodTransactions = transactions.filter(t => !t.unparseable);
+  const badTransactions = transactions.filter(t => t.unparseable);
 
   // Hive moves independently of forex tickets — sum any balance-update entries
   // posted in the same window so they don't show up as unexplained mismatches.
@@ -111,10 +115,10 @@ async function handleCashCount(event, branchConfig) {
 
   const openingTotals = { ...previous.totals, ...previous.others };
   const actualTotals = { ...current.totals, ...current.others };
-  const results = reconcile(openingTotals, actualTotals, transactions, adjustments);
+  const results = reconcile(openingTotals, actualTotals, goodTransactions, adjustments);
   const annotated = annotateWithFlagHistory(results, current);
 
-  await broadcast(RECIPIENT_CHAT_IDS, formatReport(current, annotated, transactions));
+  await broadcast(RECIPIENT_CHAT_IDS, formatReport(current, annotated, goodTransactions, badTransactions));
 }
 
 // Compares this shift's results against any open flags from prior shifts for this branch.
@@ -142,7 +146,7 @@ function annotateWithFlagHistory(results, current) {
   });
 }
 
-function formatReport(current, results, transactions) {
+function formatReport(current, results, transactions, badTransactions = []) {
   const mismatches = results.filter(r => !r.match);
   const clientTx = transactions.filter(t => !t.isWholesale);
   const wholesaleTx = transactions.filter(t => t.isWholesale);
@@ -164,6 +168,15 @@ function formatReport(current, results, transactions) {
   lines.push(mismatches.length
     ? `*Bottom line:* ${mismatches.length} currenc${mismatches.length > 1 ? 'ies' : 'y'} need checking — ${mismatches.map(m => m.ccy).join(', ')}.`
     : `*Bottom line:* everything reconciles ✅`);
+
+  if (badTransactions.length) {
+    lines.push('');
+    lines.push(`⚠️ *${badTransactions.length} ticket(s) couldn't be read* and are EXCLUDED from the math above — check these manually:`);
+    for (const bad of badTransactions) {
+      lines.push(`  • ${bad.raw.split('\n')[0].slice(0, 80)}`);
+    }
+  }
+
   lines.push('_Auto-generated from logged tickets — please verify against physical slips before treating as final._');
 
   return lines.join('\n');

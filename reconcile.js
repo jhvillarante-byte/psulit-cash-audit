@@ -14,11 +14,24 @@ function reconcile(opening, actual, transactions, adjustments = {}) {
   let phpDelta = 0;
 
   for (const tx of transactions) {
-    if (!tx || tx.fcyAmount == null) continue;
-    const sign = tx.action === 'BUY' ? -1 : 1; // company FCY change
-    expected[tx.ccy] = (expected[tx.ccy] || 0) + sign * tx.fcyAmount;
+    if (!tx || !tx.movements || !tx.movements.length) continue;
+
+    // Client tickets: BUY/SELL describes the CLIENT's action (client BUY = client
+    // buys FCY from Psulit => company FCY down, PHP up).
+    // Wholesale/corporate tickets: BUY/SELL describes what PSULIT itself did
+    // (Psulit SELL = Psulit sells FCY to the counterparty => company FCY down,
+    // PHP up) — the opposite mapping from client tickets for the same verb.
+    const effectiveAction = mv => (tx.isWholesale
+      ? (mv.action === 'SELL' ? 'BUY' : 'SELL')
+      : mv.action);
+
+    for (const mv of tx.movements) {
+      const sign = effectiveAction(mv) === 'BUY' ? -1 : 1; // company FCY change
+      expected[mv.ccy] = (expected[mv.ccy] || 0) + sign * mv.fcyAmount;
+    }
     if (tx.phpAmount != null) {
-      phpDelta += tx.action === 'BUY' ? tx.phpAmount : -tx.phpAmount;
+      const phpSign = effectiveAction(tx.movements[0]) === 'BUY' ? 1 : -1;
+      phpDelta += phpSign * tx.phpAmount;
     }
   }
   expected.PHP = (expected.PHP || 0) + phpDelta;
