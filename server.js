@@ -70,14 +70,30 @@ async function handleCashCount(event, branchConfig) {
   if (!current) return;
   if (!isClosingCount(current)) return; // only report once per shift, at close-out
 
-  // Find the previous cash count for the same branch, posted before this one.
+  const eventTime = parseReportTimestamp(current);
+  if (!eventTime) return;
+
+  // Anchor the window to the FIXED schedule, not whenever a report happened to post.
+  // Mid-Shift's report covers the combined Morning+Mid-Shift day (9AM same day -> now).
+  // Night's report covers the overnight window (8PM previous day -> now).
+  const anchorEpoch = current.shift === 'Night'
+    ? manilaEpoch(eventTime.year, eventTime.month, eventTime.day - 1, 20, 0, 0)
+    : manilaEpoch(eventTime.year, eventTime.month, eventTime.day, 9, 0, 0);
+
+  // Find the cash count whose own internal Timestamp is closest to (at or before)
+  // that anchor — this gives the correct opening VALUES for the window.
   const priorMessages = await history(cashCountChannelId, { latest: subtractSecond(event.ts), limit: 50 });
   let previous = null;
+  let bestDiff = Infinity;
   for (const msg of priorMessages) {
     const parsed = parseCashCount(msg.text || '');
-    if (parsed && parsed.branch === current.branch) {
-      previous = { ...parsed, ts: msg.ts };
-      break; // history() returns newest-first
+    if (!parsed || parsed.branch !== current.branch) continue;
+    const t = parseReportTimestamp(parsed);
+    if (!t) continue;
+    const diff = anchorEpoch - t.epoch;
+    if (diff >= 0 && diff < bestDiff) {
+      bestDiff = diff;
+      previous = parsed;
     }
   }
 
@@ -89,9 +105,14 @@ async function handleCashCount(event, branchConfig) {
     return;
   }
 
-  // Pull all transactions logged between the previous and current cash count.
+  // Transaction window is anchored to the fixed schedule time, not to whenever
+  // the baseline report was posted — e.g. a stray ticket posted at 8:20 AM
+  // belongs to neither shift under the 9AM-8PM / 8PM-5AM schedule and is excluded.
+  const windowStart = anchorEpoch.toFixed(6);
+
+  // Pull all transactions logged in the anchored window.
   const txMessages = await history(transactionsChannelId, {
-    oldest: previous.ts,
+    oldest: windowStart,
     latest: event.ts
   });
   const transactions = txMessages
@@ -119,7 +140,20 @@ async function handleCashCount(event, branchConfig) {
   const results = reconcile(openingTotals, actualTotals, goodTransactions, adjustments);
   const annotated = annotateWithFlagHistory(results, current);
 
-  await broadcast(RECIPIENT_CHAT_IDS, formatReport(current, annotated, goodTransactions, badTransactions));
+  // For the combined Morning+Mid-Shift report, credit both tellers — find the
+  // Morning teller from the same batch of messages already fetched above.
+  let morningTeller = null;
+  if (current.shift === 'Mid-Shift') {
+    for (const msg of priorMessages) {
+      const parsed = parseCashCount(msg.text || '');
+      if (parsed && parsed.branch === current.branch && parsed.shift === 'Morning') {
+        morningTeller = parsed.teller;
+        break; // newest-first, so this is the Morning shift's closing teller
+      }
+    }
+  }
+
+  await broadcast(RECIPIENT_CHAT_IDS, formatReport(current, annotated, goodTransactions, badTransactions, morningTeller));
 }
 
 // Compares this shift's results against any open flags from prior shifts for this branch.
@@ -147,14 +181,19 @@ function annotateWithFlagHistory(results, current) {
   });
 }
 
-function formatReport(current, results, transactions, badTransactions = []) {
+function formatReport(current, results, transactions, badTransactions = [], morningTeller = null) {
   const mismatches = results.filter(r => !r.match);
   const clientTx = transactions.filter(t => !t.isWholesale);
   const wholesaleTx = transactions.filter(t => t.isWholesale);
 
   let lines = [];
-  lines.push(`📊 *${current.branch} — ${current.shift} Cash Count*`);
-  lines.push(`Teller: ${current.teller || 'n/a'}`);
+  const shiftLabel = current.shift === 'Mid-Shift' ? 'Morning and Mid-Shift' : current.shift;
+  lines.push(`📊 *${current.branch} — ${shiftLabel} Cash Count*`);
+  if (current.shift === 'Mid-Shift' && morningTeller) {
+    lines.push(`Tellers: ${morningTeller} (Morning), ${current.teller || 'n/a'} (Mid-Shift)`);
+  } else {
+    lines.push(`Teller: ${current.teller || 'n/a'}`);
+  }
   lines.push(`${clientTx.length} client transaction(s)${wholesaleTx.length ? `, ${wholesaleTx.length} wholesale` : ''} checked since the last count.`);
   lines.push('');
 
@@ -189,6 +228,21 @@ function formatNum(n) {
 
 function subtractSecond(ts) {
   return (parseFloat(ts) - 0.000001).toFixed(6);
+}
+
+// Manila is UTC+8 year-round (no DST) — convert a Manila-local date/time to a
+// Unix epoch (seconds), matching the format Slack timestamps use.
+function manilaEpoch(year, month, day, hour, min, sec) {
+  return (Date.UTC(year, month - 1, day, hour, min, sec) - 8 * 3600 * 1000) / 1000;
+}
+
+// Parses the "Timestamp:" field inside a cash count report (e.g. "08/14/2026,
+// 20:11:26") into its components plus a Manila-based Unix epoch for comparison.
+function parseReportTimestamp(parsedReport) {
+  const m = (parsedReport.timestamp || '').match(/(\d{2})\/(\d{2})\/(\d{4}),\s*(\d{2}):(\d{2}):(\d{2})/);
+  if (!m) return null;
+  const [, month, day, year, hour, min, sec] = m.map(Number);
+  return { year, month, day, hour, min, sec, epoch: manilaEpoch(year, month, day, hour, min, sec) };
 }
 
 // Solaire's reports (Morning/Mid-Shift/Night) don't explicitly say "opening" or
