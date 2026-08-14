@@ -127,7 +127,7 @@ async function handleCashCount(event, branchConfig) {
   // posted in the same window so they don't show up as unexplained mismatches.
   let adjustments = {};
   if (hiveChannelId) {
-    const hiveMessages = await history(hiveChannelId, { oldest: previous.ts, latest: event.ts });
+    const hiveMessages = await history(hiveChannelId, { oldest: windowStart, latest: event.ts });
     const hiveDelta = hiveMessages
       .map(m => parseHiveEntry(m.text || ''))
       .filter(Boolean)
