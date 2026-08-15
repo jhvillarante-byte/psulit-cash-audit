@@ -290,12 +290,28 @@ async function onMorningOpeningPosted(event, branchConfig) {
     arIssues = await scanTransactionLog(transactionsChannelId, baseline.ts, opening.ts);
   }
 
-  if (totalFindings.length === 0 && denomFindings.length === 0 && reconcileFindings.length === 0 && arIssues.length === 0) {
-    return; // clean cycle — stay silent
-  }
+  const isClean = totalFindings.length === 0 && denomFindings.length === 0 && reconcileFindings.length === 0 && arIssues.length === 0;
 
-  const message = buildExplainMessage(current.branch, closingReport, opening, totalFindings, denomFindings, arIssues, reconcileFindings, enabledChecks);
+  const message = isClean
+    ? buildCleanMessage(current.branch, closingReport, opening, enabledChecks)
+    : buildExplainMessage(current.branch, closingReport, opening, totalFindings, denomFindings, arIssues, reconcileFindings, enabledChecks);
   await postMessage(cashCountChannelId, message);
+}
+
+// Posted instead of the "please explain" message when everything checks out
+// — a short, positive confirmation rather than staying silent, so the team
+// knows the check actually ran and found nothing wrong.
+function buildCleanMessage(branch, closingReport, opening, enabledChecks) {
+  const closingDate = (closingReport.timestamp || '').split(',')[0] || '';
+  const openingDate = (opening.timestamp || '').split(',')[0] || '';
+  const dateLabel = closingDate === openingDate ? closingDate : `${closingDate} → ${openingDate}`;
+
+  const checkedParts = [];
+  if (enabledChecks.includes('overnight')) checkedParts.push('the overnight cash count');
+  if (enabledChecks.includes('businessDay')) checkedParts.push("today's tickets vs. cash count");
+  const checkedLabel = checkedParts.join(' and ');
+
+  return `:white_check_mark: *Congratulations, ${branch}! No discrepancy — ${dateLabel}*\n\nChecked ${checkedLabel} and everything matches. Good job! :tada:`;
 }
 
 // Walks a chronological list of reports, extracting a value with `getValue`
