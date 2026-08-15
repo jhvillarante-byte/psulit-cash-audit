@@ -364,14 +364,14 @@ async function scanTransactionLog(transactionsChannelId, oldestTs, latestTs) {
     seenRef.get(parsed.ref).push({ text, userId: msg.user || null });
 
     if (/void/i.test(text)) {
-      issues.push({ text: `Ticket #${parsed.ref} — voided, check reason given`, userId: msg.user });
+      issues.push({ text: `AR #${parsed.ref} — please explain why this was voided`, userId: msg.user });
     }
 
     const rateMatch = /@\s*([\d.]+)/.exec(text);
     if (rateMatch && /USD/i.test(text)) {
       const rate = parseFloat(rateMatch[1]);
       if (rate > 0 && rate < 20) {
-        issues.push({ text: `Ticket #${parsed.ref} — rate ${rate} looks like a typo (missing a digit?)`, userId: msg.user });
+        issues.push({ text: `AR #${parsed.ref} — the rate ${rate} looks wrong, might be missing a digit. Please confirm the correct rate.`, userId: msg.user });
       }
     }
   }
@@ -381,9 +381,9 @@ async function scanTransactionLog(transactionsChannelId, oldestTs, latestTs) {
       const clientNames = new Set(entries.map(e => /CLIENT\s*[:\-]\s*([^\n]+)/i.exec(e.text)?.[1]?.trim()).filter(Boolean));
       const posters = [...new Set(entries.map(e => e.userId).filter(Boolean))];
       if (clientNames.size > 1) {
-        issues.push({ text: `Ticket #${ref} reused for ${clientNames.size} different clients`, userIds: posters });
+        issues.push({ text: `AR #${ref} — this same number was used for ${clientNames.size} different clients. Please explain.`, userIds: posters });
       } else if (entries.length >= 3) {
-        issues.push({ text: `Ticket #${ref} logged ${entries.length}× for the same client — confirm if duplicate or separate transactions`, userIds: posters });
+        issues.push({ text: `AR #${ref} — logged ${entries.length} times for the same client. Was this one transaction posted repeatedly, or separate ones?`, userIds: posters });
       }
     }
   }
@@ -417,27 +417,29 @@ function buildExplainMessage(branch, closingReport, opening, totalFindings, deno
       if (f.type === 'missing') {
         lines.push(`${n++}. ${tagFor(f.responsibleTeller)} — why ${f.ccy} wasn't in your closing count (present at opening: ${formatAmt(f.after)})`);
       } else {
-        lines.push(`${n++}. ${tagFor(f.responsibleTeller)} — ${f.ccy} variance of ${f.diff > 0 ? '+' : ''}${formatAmt(f.diff)} between closing and opening`);
+        const direction = f.diff > 0 ? 'more' : 'less';
+        lines.push(`${n++}. ${tagFor(f.responsibleTeller)} — ${f.ccy} is ${formatAmt(Math.abs(f.diff))} ${direction} at opening than at closing. Where did this come from?`);
       }
     }
     for (const f of denomFindings) {
       if (f.type === 'missing') {
-        lines.push(`${n++}. ${tagFor(f.responsibleTeller)} — ${f.ccy} ${f.denom} not counted at closing (${f.after} pcs at opening)`);
+        lines.push(`${n++}. ${tagFor(f.responsibleTeller)} — ${f.ccy} ${f.denom} bills weren't in your closing count (Opening has ${f.after} pcs = present)`);
       } else {
-        lines.push(`${n++}. ${tagFor(f.responsibleTeller)} — ${f.ccy} ${f.denom}: ${f.before} vs ${f.after} pcs`);
+        lines.push(`${n++}. ${tagFor(f.responsibleTeller)} — ${f.ccy} ${f.denom} bills: you counted ${f.before} pcs at closing, but opening shows ${f.after} pcs`);
       }
     }
     if (showSubHeaders) lines.push('');
   }
 
   if (hasReconcileFindings) {
-    if (showSubHeaders) lines.push(`_Business Day (Opening → Closing) Reconciliation:_`);
+    if (showSubHeaders) lines.push(`_Business Day (Opening → Closing) Check:_`);
     const unparsedCount = reconcileFindings[0]?.unparsedTicketCount || 0;
     if (unparsedCount > 0) {
-      lines.push(`:warning: _${unparsedCount} ticket(s) in this window couldn't be read and are EXCLUDED from the numbers below — treat these as provisional, not confirmed, until checked against the physical AR book._`);
+      lines.push(`:warning: _${unparsedCount} AR ticket(s) today were hard to read — please check these against the paper AR book. The numbers below might change once they're fixed._`);
     }
     for (const f of reconcileFindings) {
-      lines.push(`${n++}. ${tagFor(f.responsibleTeller)} — ${f.ccy} doesn't reconcile: expected ${formatAmt(f.expected)} (opening + day's transactions), actual ${formatAmt(f.actual)} at closing — off by ${f.diff > 0 ? '+' : ''}${formatAmt(f.diff)}`);
+      const direction = f.diff > 0 ? 'extra' : 'short';
+      lines.push(`${n++}. ${tagFor(f.responsibleTeller)} — ${f.ccy}: you counted ${formatAmt(f.actual)} at closing, but based on today's tickets it should be ${formatAmt(f.expected)}. That's ${formatAmt(Math.abs(f.diff))} ${direction}. Please check.`);
     }
     if (showSubHeaders) lines.push('');
   }
