@@ -9,7 +9,7 @@
 // msg.user is already the real culprit — no name-matching needed there.
 
 const { parseCashCount, parseDenominations, parseTransaction } = require('./parse');
-const { history, postMessage } = require('./slack');
+const { history, postMessage, fetchThreadReplies } = require('./slack');
 
 // Fallback only — used if a cash count report's teller name doesn't match any
 // known account (e.g. a name typo in the report itself). Real transaction
@@ -31,6 +31,26 @@ function subtractSecond(ts) {
   return (parseFloat(ts) - 0.000001).toFixed(6);
 }
 
+// The bot posts each report as a compact summary + a threaded reply
+// containing the full denomination breakdown. Fetches and appends that
+// reply's text so parseCashCount/parseDenominations see the whole picture.
+// Safe to call on messages with no thread — just returns the parent text.
+async function withThreadDetail(channelId, msg) {
+  let combinedText = msg.text || '';
+  if (msg.thread_ts || msg.reply_count) {
+    try {
+      const thread = await fetchThreadReplies(channelId, msg.ts);
+      for (const reply of thread.slice(1)) { // [0] is the parent itself
+        combinedText += '\n' + (reply.text || '');
+      }
+    } catch (err) {
+      console.error(`Failed to fetch thread replies for ${msg.ts}:`, err.message);
+      // Fall through with parent-only text — better a partial result than none.
+    }
+  }
+  return combinedText;
+}
+
 /**
  * MAIN ENTRY POINT — call this from server.js's /slack/events handler when
  * a "PSULIT CASH COUNT REPORT" message has shift === 'Morning'.
@@ -48,22 +68,23 @@ async function onMorningOpeningPosted(event, branchConfig) {
   for (const msg of priorMessages) {
     const parsed = parseCashCount(msg.text || '');
     if (!parsed || parsed.branch !== current.branch) continue;
+    const fullText = await withThreadDetail(cashCountChannelId, msg);
     cycleReports.unshift({ // priorMessages is newest-first; unshift to build oldest-first
-      ...parsed,
+      ...parseCashCount(fullText), // re-parse with thread detail included, for accurate totals
       ts: msg.ts,
-      rawText: msg.text,
-      userId: msg.user || null, // usually the bot's ID, not the teller — see resolveTellerUserId fallback
-      denoms: parseDenominations(msg.text || ''),
+      rawText: fullText,
+      denoms: parseDenominations(fullText),
     });
     if (parsed.shift === 'Morning') break; // this is the prior Opening — cycle boundary, stop here
   }
   if (cycleReports.length === 0 || cycleReports[0].shift !== 'Morning') return; // no full cycle to compare
 
+  const openingFullText = await withThreadDetail(cashCountChannelId, event);
   const opening = {
-    ...current,
+    ...parseCashCount(openingFullText),
     ts: event.ts,
-    rawText: event.text,
-    denoms: parseDenominations(event.text),
+    rawText: openingFullText,
+    denoms: parseDenominations(openingFullText),
   };
   const fullCycle = [...cycleReports, opening]; // oldest (prior Morning) -> newest (this Morning)
   const baseline = fullCycle[0];

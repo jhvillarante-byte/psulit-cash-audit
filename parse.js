@@ -23,18 +23,34 @@ const SYMBOL_TO_CCY = {
 function parseCashCount(text) {
   if (!text || !text.includes('PSULIT CASH COUNT REPORT')) return null;
 
-  const branch = matchOne(text, /\*Branch:\*\s*(.+)/);
-  const shift = matchOne(text, /\*Shift:\*\s*(.+)/);
-  const teller = matchOne(text, /\*Teller:\*\s*(.+)/);
-  const timestamp = matchOne(text, /\*Timestamp:\*\s*(.+)/);
-  const refCode = matchOne(text, /\*Ref Code:\*\s*(.+)/);
+  // Try the explicit-label format first (*Branch:*, *Shift:*, etc.) — still
+  // used by some historical messages. Fall back to the compact one-line
+  // format (":bank: *Solaire* | :arrows_counterclockwise: *Morning (Opening)*
+  // | :bust_in_silhouette: *TELLER*") if the labels aren't present.
+  const branch = matchOne(text, /\*Branch:\*\s*(.+)/) || matchCompactField(text, 'bank');
+
+  const shiftRaw = matchOne(text, /\*Shift:\*\s*(.+)/) || matchCompactField(text, 'arrows_counterclockwise');
+  // Compact format appends "(Opening)"/"(Closing)" to the shift name, e.g.
+  // "Morning (Opening)" — strip that so `shift` stays just "Morning"/"Night"/
+  // "Mid-Shift", matching what the rest of the codebase expects.
+  const shift = shiftRaw ? shiftRaw.replace(/\s*\(.*?\)\s*$/, '').trim() : null;
+
+  const teller = matchOne(text, /\*Teller:\*\s*(.+)/) || matchCompactField(text, 'bust_in_silhouette');
+  const timestamp = matchOne(text, /\*Timestamp:\*\s*(.+)/) || matchOne(text, /:clock1:\s*([\d\/]+,\s*[\d:]+)/);
+  const refCode = matchOne(text, /\*Ref Code:\*\s*(.+)/) || matchOne(text, /:key:\s*`([^`]+)`/) || matchOne(text, /:key:\s*(PSC-[A-Z0-9-]+)/);
 
   // Split into FOREX section and OTHERS section
   const forexSection = text.split('*OTHERS*')[0];
   const othersSection = text.split('*OTHERS*')[1] || '';
 
-  const totals = extractCurrencyBlocks(forexSection);
-  const others = extractNamedBlocks(othersSection);
+  let totals = extractCurrencyBlocks(forexSection);
+  let others = extractNamedBlocks(othersSection);
+
+  // No labeled currency blocks found (i.e. this is the compact-only summary
+  // with no thread-reply breakdown appended) — fall back to parsing the
+  // compact totals line directly so at least the totals aren't lost.
+  if (Object.keys(totals).length === 0) totals = extractCompactTotals(text);
+  if (Object.keys(others).length === 0) others = extractCompactOthers(text);
 
   return { branch, shift, teller, timestamp, refCode, totals, others };
 }
@@ -127,6 +143,44 @@ function parseDenominations(text) {
 function matchOne(text, regex) {
   const m = text.match(regex);
   return m ? m[1].trim() : null;
+}
+
+// The bot now posts reports in two parts: a compact top-level summary
+// (Branch | Shift | Teller, totals only, no denomination detail) plus a
+// "FULL DENOMINATION BREAKDOWN" thread reply in the older labeled style.
+// These helpers extract meta fields from the compact format when the
+// explicit *Branch:*/*Shift:*/*Teller:* labels aren't present.
+function matchCompactField(text, emojiCode) {
+  const re = new RegExp(`:${emojiCode}:\\s*\\*([^*]+)\\*`);
+  const m = text.match(re);
+  return m ? m[1].trim() : null;
+}
+
+// Fallback currency-total parser for the compact one-line format, e.g.
+// ":flag-ph: PHP: ₱436,641.55 | :us: USD: $28,300 | ..." — used only when
+// no thread reply / detailed breakdown is available to derive totals from.
+function extractCompactTotals(text) {
+  const totals = {};
+  // [^\d]* skips any currency symbol/prefix before the number, including
+  // multi-character ones like "HK$", "S$", "NT$" (not just single symbols).
+  const re = /\b([A-Z]{3}):\s*[^\d]*([\d,]+\.?\d*)/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    totals[m[1]] = parseFloat(m[2].replace(/,/g, ''));
+  }
+  return totals;
+}
+
+// Same idea for the compact "Hive: ₱53,378.10 | Opex: ₱417.66" line.
+function extractCompactOthers(text) {
+  const others = {};
+  const re = /\b(Hive|Opex):\s*[^\d]*([\d,]+\.?\d*)/gi;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const key = m[1][0].toUpperCase() + m[1].slice(1).toLowerCase();
+    others[key] = parseFloat(m[2].replace(/,/g, ''));
+  }
+  return others;
 }
 
 /**

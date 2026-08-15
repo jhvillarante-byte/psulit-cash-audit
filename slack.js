@@ -46,4 +46,16 @@ async function postMessage(channelId, text) {
   return res.data;
 }
 
-module.exports = { history, replyInThread, postMessage };
+// Fetches a thread's parent message + all replies. The Psulit Cash Count bot
+// posts each report as a compact top-level summary with the full
+// denomination breakdown in a threaded reply — this is how we retrieve that
+// reply's text for denomination-level parsing.
+async function fetchThreadReplies(channelId, threadTs) {
+  const res = await client().get('/conversations.replies', {
+    params: { channel: channelId, ts: threadTs }
+  });
+  if (!res.data.ok) throw new Error(`Slack replies error: ${res.data.error}`);
+  return res.data.messages || []; // messages[0] is the parent itself, rest are replies
+}
+
+module.exports = { history, replyInThread, postMessage, fetchThreadReplies };
