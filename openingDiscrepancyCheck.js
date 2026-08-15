@@ -70,13 +70,36 @@ async function withThreadDetail(channelId, msg) {
   return combinedText;
 }
 
+// Teller names that indicate a manual/placeholder test entry rather than a
+// real report — filtered out entirely so they can never be mistaken for a
+// legitimate baseline or closing report, regardless of timing.
+function isTestEntry(teller) {
+  return /^test\b/i.test((teller || '').trim());
+}
+
+// Some branches label their opening report "Morning", others "Opening" —
+// treat both as equivalent for trigger/baseline-matching purposes.
+function isOpeningShift(shift) {
+  return shift === 'Morning' || shift === 'Opening';
+}
+
+// A report counts as a "closing" report if its normalized shift is Night/
+// Closing, OR if the ORIGINAL (pre-stripped) label contains "(Closing)" —
+// e.g. Alphaland's "Mid-Shift (Closing)" normalizes to just "Mid-Shift",
+// which would otherwise lose the closing signal entirely.
+function isClosingReport(report) {
+  if (report.shift === 'Night' || report.shift === 'Closing') return true;
+  return /closing/i.test(report.shiftLabel || '');
+}
+
 /**
  * MAIN ENTRY POINT — call this from server.js's /slack/events handler when
- * a "PSULIT CASH COUNT REPORT" message has shift === 'Morning'.
+ * a "PSULIT CASH COUNT REPORT" message has shift === 'Morning' or 'Opening'.
  */
 async function onMorningOpeningPosted(event, branchConfig) {
   const current = parseCashCount(event.text);
-  if (!current || current.shift !== 'Morning') return;
+  if (!current || !isOpeningShift(current.shift)) return;
+  if (isTestEntry(current.teller)) return; // never trigger a real audit off a test entry
 
   const currentTime = parseReportTimestamp(current);
   if (!currentTime) return; // can't anchor without a readable internal timestamp
@@ -85,23 +108,24 @@ async function onMorningOpeningPosted(event, branchConfig) {
   const anchorEpoch = currentTime.epoch - 86400; // ideal: exactly 24h before this Opening
 
   // 1. Pull a wide window of prior cash count reports for this branch, and
-  //    find whichever "Morning" report's OWN internal Timestamp lands
-  //    closest to the 24h-prior anchor — not just "the first Morning-tagged
-  //    message encountered." This is what keeps a stray manual test entry
-  //    (or any other out-of-schedule message) from being mistaken for the
-  //    real prior Opening report.
+  //    find whichever Opening report's OWN internal Timestamp lands closest
+  //    to the 24h-prior anchor — not just "the first Opening-tagged message
+  //    encountered." This is what keeps a stray manual test entry (or any
+  //    other out-of-schedule message) from being mistaken for the real
+  //    prior Opening report. Test-teller entries are excluded outright.
   const priorMessages = await history(cashCountChannelId, { latest: subtractSecond(event.ts), limit: 100 });
-  const candidates = []; // { parsed, ts, msg } for every same-branch report in the window
+  const candidates = []; // { parsed, ts, msg } for every same-branch, non-test report in the window
   for (const msg of priorMessages) {
     const parsed = parseCashCount(msg.text || '');
     if (!parsed || parsed.branch !== current.branch) continue;
+    if (isTestEntry(parsed.teller)) continue;
     candidates.push({ parsed, ts: msg.ts, msg });
   }
 
   let baselineCandidate = null;
   let bestDrift = Infinity;
   for (const c of candidates) {
-    if (c.parsed.shift !== 'Morning') continue;
+    if (!isOpeningShift(c.parsed.shift)) continue;
     const t = parseReportTimestamp(c.parsed);
     if (!t) continue;
     const drift = Math.abs(t.epoch - anchorEpoch);
@@ -151,7 +175,7 @@ async function onMorningOpeningPosted(event, branchConfig) {
   //    ticket irregularities are meaningful to check across the whole day.
   let closingReport = null;
   for (let i = fullCycle.length - 2; i >= 0; i--) {
-    if (fullCycle[i].shift === 'Night') { closingReport = fullCycle[i]; break; }
+    if (isClosingReport(fullCycle[i])) { closingReport = fullCycle[i]; break; }
   }
   // Fallback: no Night report found in the cycle (e.g. missing/late report)
   // — use whichever report immediately precedes this Opening instead, so we
@@ -286,12 +310,14 @@ async function scanTransactionLog(transactionsChannelId, oldestTs, latestTs) {
 }
 
 function buildExplainMessage(branch, closingReport, opening, totalFindings, denomFindings, arIssues) {
-  const dateStr = (opening.timestamp || '').split(',')[0] || '';
+  const closingDate = (closingReport.timestamp || '').split(',')[0] || '';
+  const openingDate = (opening.timestamp || '').split(',')[0] || '';
   const closingTime = (closingReport.timestamp || '').split(', ')[1] || '';
   const openingTime = (opening.timestamp || '').split(', ')[1] || '';
+  const dateRange = closingDate === openingDate ? closingDate : `${closingDate} → ${openingDate}`;
 
   const lines = [];
-  lines.push(`*Please explain the following — ${branch}, ${dateStr} (${closingTime} → ${openingTime} overnight handover):*`, '');
+  lines.push(`*Please explain the following — ${branch}, ${dateRange} (${closingTime} → ${openingTime} overnight handover):*`, '');
 
   let n = 1;
 

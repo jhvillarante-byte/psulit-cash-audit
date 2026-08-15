@@ -52,7 +52,7 @@ function parseCashCount(text) {
   if (Object.keys(totals).length === 0) totals = extractCompactTotals(text);
   if (Object.keys(others).length === 0) others = extractCompactOthers(text);
 
-  return { branch, shift, teller, timestamp, refCode, totals, others };
+  return { branch, shift, shiftLabel: shiftRaw, teller, timestamp, refCode, totals, others };
 }
 
 // Extracts currency name headers (e.g. ":flag-ph: *PHP — Philippine Peso*") and the Subtotal that follows each
