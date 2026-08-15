@@ -100,7 +100,12 @@ function isTestEntry(teller) {
 function isOpeningShift(report) {
   const label = report.shiftLabel || report.shift || '';
   if (/\(closing\)/i.test(label)) return false;
-  return report.shift === 'Morning' || report.shift === 'Opening';
+  if (report.shift === 'Morning' || report.shift === 'Opening') return true;
+  // Symmetric to isClosingReport's "(Closing)" check below — a label like
+  // "Mid-Shift (Opening)" (Alphaland's current real format) must count as an
+  // opening trigger even though its stripped base name is "Mid-Shift", not
+  // "Morning"/"Opening".
+  return /\(opening\)/i.test(label);
 }
 
 // A report counts as a "closing" report if its normalized shift is Night/
