@@ -78,9 +78,14 @@ function isTestEntry(teller) {
 }
 
 // Some branches label their opening report "Morning", others "Opening" —
-// treat both as equivalent for trigger/baseline-matching purposes.
-function isOpeningShift(shift) {
-  return shift === 'Morning' || shift === 'Opening';
+// treat both as equivalent. Checks the RAW (pre-stripped) label first: a
+// label like "Morning (Closing)" must never match just because its stripped
+// base name happens to be "Morning" — the explicit "(Closing)" suffix always
+// wins over the base name.
+function isOpeningShift(report) {
+  const label = report.shiftLabel || report.shift || '';
+  if (/\(closing\)/i.test(label)) return false;
+  return report.shift === 'Morning' || report.shift === 'Opening';
 }
 
 // A report counts as a "closing" report if its normalized shift is Night/
@@ -98,7 +103,7 @@ function isClosingReport(report) {
  */
 async function onMorningOpeningPosted(event, branchConfig) {
   const current = parseCashCount(event.text);
-  if (!current || !isOpeningShift(current.shift)) return;
+  if (!current || !isOpeningShift(current)) return;
   if (isTestEntry(current.teller)) return; // never trigger a real audit off a test entry
 
   const currentTime = parseReportTimestamp(current);
@@ -125,7 +130,7 @@ async function onMorningOpeningPosted(event, branchConfig) {
   let baselineCandidate = null;
   let bestDrift = Infinity;
   for (const c of candidates) {
-    if (!isOpeningShift(c.parsed.shift)) continue;
+    if (!isOpeningShift(c.parsed)) continue;
     const t = parseReportTimestamp(c.parsed);
     if (!t) continue;
     const drift = Math.abs(t.epoch - anchorEpoch);
