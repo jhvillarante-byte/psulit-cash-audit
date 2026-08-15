@@ -8,8 +8,23 @@
 // tickets are posted by tellers under their own accounts (not a bot), so
 // msg.user is already the real culprit — no name-matching needed there.
 
-const { parseCashCount, parseDenominations, parseTransaction } = require('./parse');
+const { parseCashCount, parseDenominations, parseTransaction, parseHiveEntry, parseExpenseEntry } = require('./parse');
 const { history, postMessage, fetchThreadReplies } = require('./slack');
+const { reconcile } = require('./reconcile');
+
+// Which checks run for which branch. Both branches now get businessDay
+// reconciliation. Solaire's real ticket data has more format variance
+// (missing currency codes, typos, word-order differences) than Alphaland's,
+// which can cause parseTransaction to silently drop some tickets — the
+// businessDay section below flags this explicitly whenever it happens, so
+// the reconciled numbers are never presented as fact without that caveat.
+const ENABLED_CHECKS = {
+  Solaire: ['overnight', 'businessDay'],
+  Alphaland: ['businessDay'],
+};
+function getEnabledChecks(branch) {
+  return ENABLED_CHECKS[branch] || ['overnight'];
+}
 
 // Fallback only — used if a cash count report's teller name doesn't match any
 // known account (e.g. a name typo in the report itself). Real transaction
@@ -170,54 +185,111 @@ async function onMorningOpeningPosted(event, branchConfig) {
   const fullCycle = [...cycleReports, opening]; // oldest (confirmed baseline) -> newest (this Morning)
   const baseline = fullCycle[0];
 
-  // 3. Cash-count total/denomination diffing only makes sense over the
-  //    NARROW overnight gap (last Night Closing -> this Morning Opening) —
-  //    that's the only stretch where nothing should have happened at all,
-  //    so a raw diff is meaningful. Diffing across the FULL 24h cycle
-  //    instead would flag completely normal business activity (bills
-  //    naturally move as clients buy/sell all day) as "discrepancies."
-  //    The 24h cycle is still used below for AR/transaction scanning, since
-  //    ticket irregularities are meaningful to check across the whole day.
+  // 3. Cash-count checking splits into two modes depending on the branch:
+  //    - 'overnight' (Solaire): diff closingReport (yesterday's Night Close)
+  //      directly against opening (today) — nothing should have changed in
+  //      that gap, so a raw diff is meaningful.
+  //    - 'businessDay' (Alphaland): diff baseline (yesterday's Opening)
+  //      against closingReport (yesterday's Closing, same day) — business
+  //      was actively happening in that window, so raw diffs would just
+  //      show normal cash movement. Needs the day's actual transactions
+  //      netted out via reconcile() before a mismatch means anything.
   let closingReport = null;
   for (let i = fullCycle.length - 2; i >= 0; i--) {
     if (isClosingReport(fullCycle[i])) { closingReport = fullCycle[i]; break; }
   }
-  // Fallback: no Night report found in the cycle (e.g. missing/late report)
+  // Fallback: no Closing report found in the cycle (e.g. missing/late report)
   // — use whichever report immediately precedes this Opening instead, so we
   // still check SOMETHING rather than silently skipping the check entirely.
   if (!closingReport && fullCycle.length >= 2) closingReport = fullCycle[fullCycle.length - 2];
-  if (!closingReport) return; // nothing to compare the overnight gap against
+  if (!closingReport) return; // nothing to compare against
 
-  const baselineTotals = { ...closingReport.totals, ...closingReport.others };
-  const openingTotals = { ...opening.totals, ...opening.others };
-  const totalFindings = diffTotals(baselineTotals, openingTotals);
-  const denomFindings = diffDenominations(closingReport.denoms, opening.denoms);
+  const enabledChecks = getEnabledChecks(current.branch);
+  let totalFindings = [];
+  let denomFindings = [];
+  let reconcileFindings = [];
 
-  // 4. Attribute every overnight-gap finding to the CLOSING teller directly —
-  //    not via pinpointShift. With only two points (closing, opening), a
-  //    changed value means the closing count was the wrong one (that's the
-  //    whole premise of the overnight gap check), so responsibility belongs
-  //    to whoever closed, not to the opening teller who correctly caught it.
   const closingResponsible = {
     teller: closingReport.teller,
     userId: resolveTellerUserId(closingReport.teller),
     shift: closingReport.shift,
   };
-  for (const f of denomFindings) f.responsibleTeller = closingResponsible;
-  for (const f of totalFindings) f.responsibleTeller = closingResponsible;
 
-  // 5. Scan the full 24h cycle's transactions for AR irregularities — tag the
+  if (enabledChecks.includes('overnight')) {
+    // Raw diff: closingReport (before) vs opening (after) — the overnight
+    // no-activity gap. Nothing should move here, so a raw diff is meaningful.
+    const beforeTotals = { ...closingReport.totals, ...closingReport.others };
+    const afterTotals = { ...opening.totals, ...opening.others };
+    totalFindings = diffTotals(beforeTotals, afterTotals);
+    denomFindings = diffDenominations(closingReport.denoms, opening.denoms);
+
+    // Attribute every finding to the CLOSING teller directly (not via
+    // pinpointShift) — with only two points, a changed value means the
+    // closing count was the wrong one, so responsibility is theirs.
+    for (const f of denomFindings) f.responsibleTeller = closingResponsible;
+    for (const f of totalFindings) f.responsibleTeller = closingResponsible;
+  }
+
+  if (enabledChecks.includes('businessDay')) {
+    // baseline (this cycle's Opening, before) vs closingReport (same day's
+    // Closing, after) — reconciled against the day's actual transactions
+    // via reconcile(), since business was actively happening in that window
+    // and a raw diff would just show normal cash movement.
+    const dayOpeningTotals = { ...baseline.totals, ...baseline.others };
+    const dayClosingTotals = { ...closingReport.totals, ...closingReport.others };
+
+    const txMessages = transactionsChannelId
+      ? await history(transactionsChannelId, { oldest: baseline.ts, latest: closingReport.ts, limit: 200 })
+      : [];
+    // Track which messages LOOK like a ticket (AR/ARN/VN + a number) but
+    // failed to parse into usable movements — these are silently excluded
+    // from the reconciliation math below, so anyone reading the result needs
+    // to know the numbers may be incomplete, not treated as confirmed fact.
+    const looksLikeTicket = t => /(?:VN|ARN|AR)\s*#?\s*0*\d+/i.test(t);
+    let unparsedTicketCount = 0;
+    const dayTransactions = [];
+    for (const m of txMessages) {
+      const text = m.text || '';
+      const parsed = parseTransaction(text);
+      if (parsed) {
+        dayTransactions.push(parsed);
+      } else if (looksLikeTicket(text) && !/void/i.test(text)) {
+        unparsedTicketCount++; // void tickets are expected to have no movements — don't flag those
+      }
+    }
+
+    // Optional Hive/Opex adjustments, same pattern as server.js's
+    // handleCashCount — only applies if those channels are configured.
+    const adjustments = {};
+    if (branchConfig.hiveChannelId) {
+      const hiveMessages = await history(branchConfig.hiveChannelId, { oldest: baseline.ts, latest: closingReport.ts });
+      const hiveDelta = hiveMessages.map(m => parseHiveEntry(m.text || '')).filter(Boolean).reduce((s, e) => s + e.amount, 0);
+      if (hiveDelta !== 0) adjustments.Hive = hiveDelta;
+    }
+    if (branchConfig.expensesChannelId) {
+      const expenseMessages = await history(branchConfig.expensesChannelId, { oldest: baseline.ts, latest: closingReport.ts });
+      const expenseTotal = expenseMessages.map(m => parseExpenseEntry(m.text || '')).filter(Boolean).reduce((s, e) => s + e.amount, 0);
+      if (expenseTotal !== 0) adjustments.Opex = expenseTotal;
+    }
+
+    const results = reconcile(dayOpeningTotals, dayClosingTotals, dayTransactions, adjustments);
+    reconcileFindings = results
+      .filter(r => !r.match)
+      .map(r => ({ ...r, responsibleTeller: closingResponsible, unparsedTicketCount }));
+  }
+
+  // 4. Scan the full 24h cycle's transactions for AR irregularities — tag the
   //    ACTUAL poster (msg.user) for each, since tickets aren't bot-posted.
   let arIssues = [];
   if (transactionsChannelId) {
     arIssues = await scanTransactionLog(transactionsChannelId, baseline.ts, opening.ts);
   }
 
-  if (totalFindings.length === 0 && denomFindings.length === 0 && arIssues.length === 0) {
+  if (totalFindings.length === 0 && denomFindings.length === 0 && reconcileFindings.length === 0 && arIssues.length === 0) {
     return; // clean cycle — stay silent
   }
 
-  const message = buildExplainMessage(current.branch, closingReport, opening, totalFindings, denomFindings, arIssues);
+  const message = buildExplainMessage(current.branch, closingReport, opening, totalFindings, denomFindings, arIssues, reconcileFindings, enabledChecks);
   await postMessage(cashCountChannelId, message);
 }
 
@@ -314,15 +386,14 @@ async function scanTransactionLog(transactionsChannelId, oldestTs, latestTs) {
   return issues;
 }
 
-function buildExplainMessage(branch, closingReport, opening, totalFindings, denomFindings, arIssues) {
+function buildExplainMessage(branch, closingReport, opening, totalFindings, denomFindings, arIssues, reconcileFindings = [], enabledChecks = ['overnight']) {
   const closingDate = (closingReport.timestamp || '').split(',')[0] || '';
   const openingDate = (opening.timestamp || '').split(',')[0] || '';
   const closingTime = (closingReport.timestamp || '').split(', ')[1] || '';
   const openingTime = (opening.timestamp || '').split(', ')[1] || '';
-  const dateRange = closingDate === openingDate ? closingDate : `${closingDate} → ${openingDate}`;
 
   const lines = [];
-  lines.push(`*Please explain the following — ${branch}, ${dateRange} (${closingTime} → ${openingTime} overnight handover):*`, '');
+  lines.push(`*Please explain the following — ${branch}, ${closingDate}${openingDate !== closingDate ? ' → ' + openingDate : ''}:*`, '');
 
   let n = 1;
 
@@ -331,20 +402,39 @@ function buildExplainMessage(branch, closingReport, opening, totalFindings, deno
     return responsible.userId ? `<@${responsible.userId}>` : `${responsible.teller} (${responsible.shift})`;
   };
 
-  for (const f of totalFindings) {
-    if (f.type === 'missing') {
-      lines.push(`${n++}. ${tagFor(f.responsibleTeller)} — why ${f.ccy} wasn't in your closing count (present at opening: ${formatAmt(f.after)})`);
-    } else {
-      lines.push(`${n++}. ${tagFor(f.responsibleTeller)} — ${f.ccy} variance of ${f.diff > 0 ? '+' : ''}${formatAmt(f.diff)} between closing and opening`);
+  const hasOvernightFindings = totalFindings.length > 0 || denomFindings.length > 0;
+  const hasReconcileFindings = reconcileFindings.length > 0;
+  const showSubHeaders = enabledChecks.includes('overnight') && enabledChecks.includes('businessDay');
+
+  if (hasOvernightFindings) {
+    if (showSubHeaders) lines.push(`_Overnight (${closingTime} → ${openingTime}, nothing should have changed):_`);
+    for (const f of totalFindings) {
+      if (f.type === 'missing') {
+        lines.push(`${n++}. ${tagFor(f.responsibleTeller)} — why ${f.ccy} wasn't in your closing count (present at opening: ${formatAmt(f.after)})`);
+      } else {
+        lines.push(`${n++}. ${tagFor(f.responsibleTeller)} — ${f.ccy} variance of ${f.diff > 0 ? '+' : ''}${formatAmt(f.diff)} between closing and opening`);
+      }
     }
+    for (const f of denomFindings) {
+      if (f.type === 'missing') {
+        lines.push(`${n++}. ${tagFor(f.responsibleTeller)} — ${f.ccy} ${f.denom} not counted at closing (${f.after} pcs at opening)`);
+      } else {
+        lines.push(`${n++}. ${tagFor(f.responsibleTeller)} — ${f.ccy} ${f.denom}: ${f.before} vs ${f.after} pcs`);
+      }
+    }
+    if (showSubHeaders) lines.push('');
   }
 
-  for (const f of denomFindings) {
-    if (f.type === 'missing') {
-      lines.push(`${n++}. ${tagFor(f.responsibleTeller)} — ${f.ccy} ${f.denom} not counted at closing (${f.after} pcs at opening)`);
-    } else {
-      lines.push(`${n++}. ${tagFor(f.responsibleTeller)} — ${f.ccy} ${f.denom}: ${f.before} vs ${f.after} pcs`);
+  if (hasReconcileFindings) {
+    if (showSubHeaders) lines.push(`_Business Day (Opening → Closing) Reconciliation:_`);
+    const unparsedCount = reconcileFindings[0]?.unparsedTicketCount || 0;
+    if (unparsedCount > 0) {
+      lines.push(`:warning: _${unparsedCount} ticket(s) in this window couldn't be read and are EXCLUDED from the numbers below — treat these as provisional, not confirmed, until checked against the physical AR book._`);
     }
+    for (const f of reconcileFindings) {
+      lines.push(`${n++}. ${tagFor(f.responsibleTeller)} — ${f.ccy} doesn't reconcile: expected ${formatAmt(f.expected)} (opening + day's transactions), actual ${formatAmt(f.actual)} at closing — off by ${f.diff > 0 ? '+' : ''}${formatAmt(f.diff)}`);
+    }
+    if (showSubHeaders) lines.push('');
   }
 
   for (const issue of arIssues) {
@@ -356,7 +446,7 @@ function buildExplainMessage(branch, closingReport, opening, totalFindings, deno
 
   const openingUserId = resolveTellerUserId(opening.teller);
   const openingTag = openingUserId ? `<@${openingUserId}>` : opening.teller;
-  if (totalFindings.length > 0 || denomFindings.length > 0) {
+  if (hasOvernightFindings) {
     lines.push('');
     lines.push(`${n++}. ${openingTag} — please confirm the amounts above were already in the drawer when you opened, or added by you before submission.`);
   }
