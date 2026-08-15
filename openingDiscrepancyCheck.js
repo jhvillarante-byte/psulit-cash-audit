@@ -31,6 +31,25 @@ function subtractSecond(ts) {
   return (parseFloat(ts) - 0.000001).toFixed(6);
 }
 
+// Manila is UTC+8 year-round — matches the same anchoring approach server.js
+// already uses for Closing counts.
+function manilaEpoch(year, month, day, hour, min, sec) {
+  return (Date.UTC(year, month - 1, day, hour, min, sec) - 8 * 3600 * 1000) / 1000;
+}
+
+function parseReportTimestamp(parsedReport) {
+  const m = (parsedReport.timestamp || '').match(/(\d{2})\/(\d{2})\/(\d{4}),\s*(\d{2}):(\d{2}):(\d{2})/);
+  if (!m) return null;
+  const [, month, day, year, hour, min, sec] = m.map(Number);
+  return { year, month, day, hour, min, sec, epoch: manilaEpoch(year, month, day, hour, min, sec) };
+}
+
+// Max drift allowed between a candidate baseline report's own internal
+// Timestamp and the ideal 24h-prior anchor. Keeps a stray/manual test entry
+// (which won't land anywhere near the real ~9AM schedule slot) from ever
+// being mistaken for yesterday's real Opening report.
+const BASELINE_TOLERANCE_SECONDS = 4 * 3600; // 4 hours either side
+
 // The bot posts each report as a compact summary + a threaded reply
 // containing the full denomination breakdown. Fetches and appends that
 // reply's text so parseCashCount/parseDenominations see the whole picture.
@@ -59,25 +78,58 @@ async function onMorningOpeningPosted(event, branchConfig) {
   const current = parseCashCount(event.text);
   if (!current || current.shift !== 'Morning') return;
 
-  const { cashCountChannelId, transactionsChannelId } = branchConfig;
+  const currentTime = parseReportTimestamp(current);
+  if (!currentTime) return; // can't anchor without a readable internal timestamp
 
-  // 1. Pull every cash count report for this branch since the prior Morning
-  //    Opening (i.e. the whole 24h cycle: Morning -> Mid-Shift -> Night -> Morning).
-  const priorMessages = await history(cashCountChannelId, { latest: subtractSecond(event.ts), limit: 80 });
-  const cycleReports = []; // chronological, oldest first, populated below
+  const { cashCountChannelId, transactionsChannelId } = branchConfig;
+  const anchorEpoch = currentTime.epoch - 86400; // ideal: exactly 24h before this Opening
+
+  // 1. Pull a wide window of prior cash count reports for this branch, and
+  //    find whichever "Morning" report's OWN internal Timestamp lands
+  //    closest to the 24h-prior anchor — not just "the first Morning-tagged
+  //    message encountered." This is what keeps a stray manual test entry
+  //    (or any other out-of-schedule message) from being mistaken for the
+  //    real prior Opening report.
+  const priorMessages = await history(cashCountChannelId, { latest: subtractSecond(event.ts), limit: 100 });
+  const candidates = []; // { parsed, ts, msg } for every same-branch report in the window
   for (const msg of priorMessages) {
     const parsed = parseCashCount(msg.text || '');
     if (!parsed || parsed.branch !== current.branch) continue;
-    const fullText = await withThreadDetail(cashCountChannelId, msg);
-    cycleReports.unshift({ // priorMessages is newest-first; unshift to build oldest-first
+    candidates.push({ parsed, ts: msg.ts, msg });
+  }
+
+  let baselineCandidate = null;
+  let bestDrift = Infinity;
+  for (const c of candidates) {
+    if (c.parsed.shift !== 'Morning') continue;
+    const t = parseReportTimestamp(c.parsed);
+    if (!t) continue;
+    const drift = Math.abs(t.epoch - anchorEpoch);
+    if (drift < bestDrift) {
+      bestDrift = drift;
+      baselineCandidate = c;
+    }
+  }
+  if (!baselineCandidate || bestDrift > BASELINE_TOLERANCE_SECONDS) {
+    console.error(`No valid 24h-prior Opening report found for ${current.branch} within tolerance (best drift: ${bestDrift === Infinity ? 'n/a' : (bestDrift / 3600).toFixed(1) + 'h'}) — skipping this cycle.`);
+    return;
+  }
+
+  // 2. Build the full cycle: every same-branch report between the confirmed
+  //    baseline and this Opening, chronological order (oldest -> newest).
+  const cycleCandidates = candidates.filter(c => parseFloat(c.ts) >= parseFloat(baselineCandidate.ts));
+  cycleCandidates.sort((a, b) => parseFloat(a.ts) - parseFloat(b.ts));
+
+  const cycleReports = [];
+  for (const c of cycleCandidates) {
+    const fullText = await withThreadDetail(cashCountChannelId, c.msg);
+    cycleReports.push({
       ...parseCashCount(fullText), // re-parse with thread detail included, for accurate totals
-      ts: msg.ts,
+      ts: c.ts,
       rawText: fullText,
       denoms: parseDenominations(fullText),
     });
-    if (parsed.shift === 'Morning') break; // this is the prior Opening — cycle boundary, stop here
   }
-  if (cycleReports.length === 0 || cycleReports[0].shift !== 'Morning') return; // no full cycle to compare
 
   const openingFullText = await withThreadDetail(cashCountChannelId, event);
   const opening = {
@@ -86,26 +138,46 @@ async function onMorningOpeningPosted(event, branchConfig) {
     rawText: openingFullText,
     denoms: parseDenominations(openingFullText),
   };
-  const fullCycle = [...cycleReports, opening]; // oldest (prior Morning) -> newest (this Morning)
+  const fullCycle = [...cycleReports, opening]; // oldest (confirmed baseline) -> newest (this Morning)
   const baseline = fullCycle[0];
 
-  // 2. Diff currency totals and denominations, baseline vs this morning
-  const baselineTotals = { ...baseline.totals, ...baseline.others };
+  // 3. Cash-count total/denomination diffing only makes sense over the
+  //    NARROW overnight gap (last Night Closing -> this Morning Opening) —
+  //    that's the only stretch where nothing should have happened at all,
+  //    so a raw diff is meaningful. Diffing across the FULL 24h cycle
+  //    instead would flag completely normal business activity (bills
+  //    naturally move as clients buy/sell all day) as "discrepancies."
+  //    The 24h cycle is still used below for AR/transaction scanning, since
+  //    ticket irregularities are meaningful to check across the whole day.
+  let closingReport = null;
+  for (let i = fullCycle.length - 2; i >= 0; i--) {
+    if (fullCycle[i].shift === 'Night') { closingReport = fullCycle[i]; break; }
+  }
+  // Fallback: no Night report found in the cycle (e.g. missing/late report)
+  // — use whichever report immediately precedes this Opening instead, so we
+  // still check SOMETHING rather than silently skipping the check entirely.
+  if (!closingReport && fullCycle.length >= 2) closingReport = fullCycle[fullCycle.length - 2];
+  if (!closingReport) return; // nothing to compare the overnight gap against
+
+  const baselineTotals = { ...closingReport.totals, ...closingReport.others };
   const openingTotals = { ...opening.totals, ...opening.others };
   const totalFindings = diffTotals(baselineTotals, openingTotals);
-  const denomFindings = diffDenominations(baseline.denoms, opening.denoms);
+  const denomFindings = diffDenominations(closingReport.denoms, opening.denoms);
 
-  // 3. For each finding, walk the full cycle to pinpoint which shift-to-shift
-  //    transition it first appeared in, and attribute it to that shift's teller.
-  for (const f of denomFindings) {
-    f.responsibleTeller = pinpointShift(fullCycle, (r) => r.denoms[f.ccy]?.[f.denom]);
-  }
-  for (const f of totalFindings) {
-    const combinedTotals = (r) => ({ ...r.totals, ...r.others })[f.ccy];
-    f.responsibleTeller = pinpointShift(fullCycle, combinedTotals);
-  }
+  // 4. Attribute every overnight-gap finding to the CLOSING teller directly —
+  //    not via pinpointShift. With only two points (closing, opening), a
+  //    changed value means the closing count was the wrong one (that's the
+  //    whole premise of the overnight gap check), so responsibility belongs
+  //    to whoever closed, not to the opening teller who correctly caught it.
+  const closingResponsible = {
+    teller: closingReport.teller,
+    userId: resolveTellerUserId(closingReport.teller),
+    shift: closingReport.shift,
+  };
+  for (const f of denomFindings) f.responsibleTeller = closingResponsible;
+  for (const f of totalFindings) f.responsibleTeller = closingResponsible;
 
-  // 4. Scan the full 24h cycle's transactions for AR irregularities — tag the
+  // 5. Scan the full 24h cycle's transactions for AR irregularities — tag the
   //    ACTUAL poster (msg.user) for each, since tickets aren't bot-posted.
   let arIssues = [];
   if (transactionsChannelId) {
@@ -113,10 +185,10 @@ async function onMorningOpeningPosted(event, branchConfig) {
   }
 
   if (totalFindings.length === 0 && denomFindings.length === 0 && arIssues.length === 0) {
-    return; // clean 24h cycle — stay silent
+    return; // clean cycle — stay silent
   }
 
-  const message = buildExplainMessage(current.branch, baseline, opening, totalFindings, denomFindings, arIssues);
+  const message = buildExplainMessage(current.branch, closingReport, opening, totalFindings, denomFindings, arIssues);
   await postMessage(cashCountChannelId, message);
 }
 
@@ -213,12 +285,13 @@ async function scanTransactionLog(transactionsChannelId, oldestTs, latestTs) {
   return issues;
 }
 
-function buildExplainMessage(branch, baseline, opening, totalFindings, denomFindings, arIssues) {
+function buildExplainMessage(branch, closingReport, opening, totalFindings, denomFindings, arIssues) {
   const dateStr = (opening.timestamp || '').split(',')[0] || '';
-  const baselineDate = (baseline.timestamp || '').split(',')[0] || '';
+  const closingTime = (closingReport.timestamp || '').split(', ')[1] || '';
+  const openingTime = (opening.timestamp || '').split(', ')[1] || '';
 
   const lines = [];
-  lines.push(`*Please explain the following — ${branch}, ${baselineDate} 8AM to ${dateStr} 8AM (24h cycle):*`, '');
+  lines.push(`*Please explain the following — ${branch}, ${dateStr} (${closingTime} → ${openingTime} overnight handover):*`, '');
 
   let n = 1;
 
@@ -229,17 +302,17 @@ function buildExplainMessage(branch, baseline, opening, totalFindings, denomFind
 
   for (const f of totalFindings) {
     if (f.type === 'missing') {
-      lines.push(`${n++}. ${tagFor(f.responsibleTeller)} — why ${f.ccy} wasn't in the prior opening count (present now: ${formatAmt(f.after)})`);
+      lines.push(`${n++}. ${tagFor(f.responsibleTeller)} — why ${f.ccy} wasn't in your closing count (present at opening: ${formatAmt(f.after)})`);
     } else {
-      lines.push(`${n++}. ${tagFor(f.responsibleTeller)} — ${f.ccy} variance of ${f.diff > 0 ? '+' : ''}${formatAmt(f.diff)} over the 24h cycle`);
+      lines.push(`${n++}. ${tagFor(f.responsibleTeller)} — ${f.ccy} variance of ${f.diff > 0 ? '+' : ''}${formatAmt(f.diff)} between closing and opening`);
     }
   }
 
   for (const f of denomFindings) {
     if (f.type === 'missing') {
-      lines.push(`${n++}. ${tagFor(f.responsibleTeller)} — ${f.ccy} ${f.denom} not counted (${f.after} pcs now)`);
+      lines.push(`${n++}. ${tagFor(f.responsibleTeller)} — ${f.ccy} ${f.denom} not counted at closing (${f.after} pcs at opening)`);
     } else {
-      lines.push(`${n++}. ${tagFor(f.responsibleTeller)} — ${f.ccy} ${f.denom}: changed from ${f.before} to ${f.after} pcs`);
+      lines.push(`${n++}. ${tagFor(f.responsibleTeller)} — ${f.ccy} ${f.denom}: ${f.before} vs ${f.after} pcs`);
     }
   }
 
@@ -248,6 +321,13 @@ function buildExplainMessage(branch, baseline, opening, totalFindings, denomFind
       ? issue.userIds.map(id => `<@${id}>`).join(' & ')
       : (issue.userId ? `<@${issue.userId}>` : '_(unknown poster)_');
     lines.push(`${n++}. ${tag} — ${issue.text}`);
+  }
+
+  const openingUserId = resolveTellerUserId(opening.teller);
+  const openingTag = openingUserId ? `<@${openingUserId}>` : opening.teller;
+  if (totalFindings.length > 0 || denomFindings.length > 0) {
+    lines.push('');
+    lines.push(`${n++}. ${openingTag} — please confirm the amounts above were already in the drawer when you opened, or added by you before submission.`);
   }
 
   lines.push('');
