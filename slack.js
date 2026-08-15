@@ -34,4 +34,16 @@ async function replyInThread(channelId, threadTs, text) {
   return res.data;
 }
 
-module.exports = { history, replyInThread };
+// Posts a new top-level message (not threaded) — used for the opening
+// discrepancy check so teller @-tags render prominently in the channel.
+async function postMessage(channelId, text) {
+  const res = await client().post('/chat.postMessage', {
+    channel: channelId,
+    text,
+    unfurl_links: false
+  });
+  if (!res.data.ok) throw new Error(`Slack postMessage error: ${res.data.error}`);
+  return res.data;
+}
+
+module.exports = { history, replyInThread, postMessage };

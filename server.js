@@ -5,6 +5,7 @@ const { parseCashCount, parseTransaction, parseHiveEntry, parseExpenseEntry } = 
 const { reconcile } = require('./reconcile');
 const { history } = require('./slack');
 const { broadcast } = require('./telegram');
+const { onMorningOpeningPosted } = require('./openingDiscrepancyCheck');
 
 const app = express();
 
@@ -61,6 +62,16 @@ app.post('/slack/events', async (req, res) => {
     await handleCashCount(event, branchConfig);
   } catch (err) {
     console.error('Failed to process cash count:', err);
+  }
+
+  // Opening (8AM) discrepancy check — 24h cycle vs. the prior Morning Opening,
+  // pinpoints which shift/teller introduced each discrepancy, posts to Slack.
+  // Runs independently of handleCashCount above (which only acts on Closing
+  // counts) — onMorningOpeningPosted itself no-ops on any non-Morning report.
+  try {
+    await onMorningOpeningPosted(event, branchConfig);
+  } catch (err) {
+    console.error('Failed to process opening discrepancy check:', err);
   }
 });
 
