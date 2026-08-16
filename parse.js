@@ -18,46 +18,52 @@ const SYMBOL_TO_CCY = {
 
 /**
  * Parses a "PSULIT CASH COUNT REPORT" message into structured totals.
- * Returns { branch, shift, teller, timestamp, refCode, totals: { USD: 123.45, PHP: ..., ... }, others: { Hive: ..., Opex: ... } }
+ * Returns { branch, shift, teller, timestamp, refCode, totals: { USD: 123.45, PHP: ..., ... },
+ *           others: { Hive: ..., Opex: ... }, denominations: { PHP: [{value,count}], Hive: [...], ... } }
  */
 function parseCashCount(text) {
   if (!text || !text.includes('PSULIT CASH COUNT REPORT')) return null;
 
-  // Try the explicit-label format first (*Branch:*, *Shift:*, etc.) — still
-  // used by some historical messages. Fall back to the compact one-line
-  // format (":bank: *Solaire* | :arrows_counterclockwise: *Morning (Opening)*
-  // | :bust_in_silhouette: *TELLER*") if the labels aren't present.
-  const branch = matchOne(text, /\*Branch:\*\s*(.+)/) || matchCompactField(text, 'bank');
-
-  const shiftRaw = matchOne(text, /\*Shift:\*\s*(.+)/) || matchCompactField(text, 'arrows_counterclockwise');
-  // Compact format appends "(Opening)"/"(Closing)" to the shift name, e.g.
-  // "Morning (Opening)" — strip that so `shift` stays just "Morning"/"Night"/
-  // "Mid-Shift", matching what the rest of the codebase expects.
-  const shift = shiftRaw ? shiftRaw.replace(/\s*\(.*?\)\s*$/, '').trim() : null;
-
-  const teller = matchOne(text, /\*Teller:\*\s*(.+)/) || matchCompactField(text, 'bust_in_silhouette');
-  const timestamp = matchOne(text, /\*Timestamp:\*\s*(.+)/) || matchOne(text, /:clock1:\s*([\d\/]+,\s*[\d:]+)/);
-  const refCode = matchOne(text, /\*Ref Code:\*\s*(.+)/) || matchOne(text, /:key:\s*`([^`]+)`/) || matchOne(text, /:key:\s*(PSC-[A-Z0-9-]+)/);
+  const branch = matchOne(text, /\*Branch:\*\s*(.+)/);
+  const shift = matchOne(text, /\*Shift:\*\s*(.+)/);
+  const teller = matchOne(text, /\*Teller:\*\s*(.+)/);
+  const timestamp = matchOne(text, /\*Timestamp:\*\s*(.+)/);
+  const refCode = matchOne(text, /\*Ref Code:\*\s*(.+)/);
 
   // Split into FOREX section and OTHERS section
   const forexSection = text.split('*OTHERS*')[0];
   const othersSection = text.split('*OTHERS*')[1] || '';
 
-  let totals = extractCurrencyBlocks(forexSection);
-  let others = extractNamedBlocks(othersSection);
+  const forex = extractCurrencyBlocks(forexSection);
+  const others = extractNamedBlocks(othersSection);
 
-  // No labeled currency blocks found (i.e. this is the compact-only summary
-  // with no thread-reply breakdown appended) — fall back to parsing the
-  // compact totals line directly so at least the totals aren't lost.
-  if (Object.keys(totals).length === 0) totals = extractCompactTotals(text);
-  if (Object.keys(others).length === 0) others = extractCompactOthers(text);
+  return {
+    branch, shift, teller, timestamp, refCode,
+    totals: forex.totals,
+    others: others.totals,
+    denominations: { ...forex.denominations, ...others.denominations }
+  };
+}
 
-  return { branch, shift, shiftLabel: shiftRaw, teller, timestamp, refCode, totals, others };
+// Parses individual denomination lines within a block, e.g. "₱1,000 × 175 = ₱175,000"
+// or "25¢ × 2 = ₱0.50". Returns [{ value, count }], value in base currency units
+// (centavo lines like "25¢" become 0.25).
+function parseDenominationLines(block) {
+  const lines = [];
+  const lineRegex = /(?:₱|\$|€|£|¥|HK\$|S\$)?\s*([\d,]+\.?\d*)\s*(¢)?\s*[×x]\s*(\d+)\s*=/g;
+  let m;
+  while ((m = lineRegex.exec(block)) !== null) {
+    let value = parseFloat(m[1].replace(/,/g, ''));
+    if (m[2]) value = value / 100; // centavo denominations (25¢ -> 0.25)
+    lines.push({ value, count: parseInt(m[3], 10) });
+  }
+  return lines;
 }
 
 // Extracts currency name headers (e.g. ":flag-ph: *PHP — Philippine Peso*") and the Subtotal that follows each
 function extractCurrencyBlocks(section) {
   const totals = {};
+  const denominations = {};
   const headerRegex = /\*([A-Z]{3})\s*—[^*]*\*/g;
   let match;
   const headers = [];
@@ -72,13 +78,15 @@ function extractCurrencyBlocks(section) {
     if (subtotalMatch) {
       totals[headers[i].ccy] = parseFloat(subtotalMatch[1].replace(/,/g, ''));
     }
+    denominations[headers[i].ccy] = parseDenominationLines(block);
   }
-  return totals;
+  return { totals, denominations };
 }
 
 // Extracts named blocks under OTHERS (e.g. "Hive", "Opex") with their Subtotal
 function extractNamedBlocks(section) {
-  const others = {};
+  const totals = {};
+  const denominations = {};
   const headerRegex = /:[\w_]+:\s*([A-Za-z]+)\n/g;
   let match;
   const headers = [];
@@ -91,96 +99,16 @@ function extractNamedBlocks(section) {
     const block = section.slice(start, end);
     const subtotalMatch = block.match(/\*Subtotal:\s*[^\d]*([\d,]+\.?\d*)\*/);
     if (subtotalMatch) {
-      others[headers[i].name] = parseFloat(subtotalMatch[1].replace(/,/g, ''));
+      totals[headers[i].name] = parseFloat(subtotalMatch[1].replace(/,/g, ''));
     }
+    denominations[headers[i].name] = parseDenominationLines(block);
   }
-  return others;
-}
-
-/**
- * Parses denomination-level line items from a "PSULIT CASH COUNT REPORT"
- * message, e.g. "₱1,000 × 283 = ₱283,000" -> { PHP: { '1000': 283, ... } }.
- * Needed to catch discrepancies that a currency subtotal alone can hide —
- * e.g. a whole denomination being skipped even though other denominations
- * in the same currency are correct (the subtotal just comes out short).
- *
- * Returns { PHP: { '1000': 283, '500': 297, ... }, USD: { '100': 271, ... }, ... }
- */
-function parseDenominations(text) {
-  if (!text || !text.includes('PSULIT CASH COUNT REPORT')) return {};
-
-  const forexSection = text.split('*OTHERS*')[0];
-  const headerRegex = /\*([A-Z]{3})\s*—[^*]*\*/g;
-  const headers = [];
-  let match;
-  while ((match = headerRegex.exec(forexSection)) !== null) {
-    headers.push({ ccy: match[1], index: match.index });
-  }
-
-  const denoms = {};
-  for (let i = 0; i < headers.length; i++) {
-    const start = headers[i].index;
-    const end = i + 1 < headers.length ? headers[i + 1].index : forexSection.length;
-    const block = forexSection.slice(start, end);
-
-    // Matches lines like "₱1,000 × 283 = ₱283,000" or "5¢ × 4 = ₱0.20"
-    const lineRegex = /([₱$¥€£]?[\d,]+\.?\d*¢?)\s*×\s*(\d+)\s*=/g;
-    let lineMatch;
-    const ccyDenoms = {};
-    while ((lineMatch = lineRegex.exec(block)) !== null) {
-      // Normalize the denomination label to a bare number string for comparison
-      // (strip currency symbols/commas so "₱1,000" and "1000" match consistently).
-      const label = lineMatch[1].replace(/[₱$¥€£,]/g, '');
-      ccyDenoms[label] = parseInt(lineMatch[2], 10);
-    }
-    if (Object.keys(ccyDenoms).length > 0) {
-      denoms[headers[i].ccy] = ccyDenoms;
-    }
-  }
-  return denoms;
+  return { totals, denominations };
 }
 
 function matchOne(text, regex) {
   const m = text.match(regex);
   return m ? m[1].trim() : null;
-}
-
-// The bot now posts reports in two parts: a compact top-level summary
-// (Branch | Shift | Teller, totals only, no denomination detail) plus a
-// "FULL DENOMINATION BREAKDOWN" thread reply in the older labeled style.
-// These helpers extract meta fields from the compact format when the
-// explicit *Branch:*/*Shift:*/*Teller:* labels aren't present.
-function matchCompactField(text, emojiCode) {
-  const re = new RegExp(`:${emojiCode}:\\s*\\*([^*]+)\\*`);
-  const m = text.match(re);
-  return m ? m[1].trim() : null;
-}
-
-// Fallback currency-total parser for the compact one-line format, e.g.
-// ":flag-ph: PHP: ₱436,641.55 | :us: USD: $28,300 | ..." — used only when
-// no thread reply / detailed breakdown is available to derive totals from.
-function extractCompactTotals(text) {
-  const totals = {};
-  // [^\d]* skips any currency symbol/prefix before the number, including
-  // multi-character ones like "HK$", "S$", "NT$" (not just single symbols).
-  const re = /\b([A-Z]{3}):\s*[^\d]*([\d,]+\.?\d*)/g;
-  let m;
-  while ((m = re.exec(text)) !== null) {
-    totals[m[1]] = parseFloat(m[2].replace(/,/g, ''));
-  }
-  return totals;
-}
-
-// Same idea for the compact "Hive: ₱53,378.10 | Opex: ₱417.66" line.
-function extractCompactOthers(text) {
-  const others = {};
-  const re = /\b(Hive|Opex):\s*[^\d]*([\d,]+\.?\d*)/gi;
-  let m;
-  while ((m = re.exec(text)) !== null) {
-    const key = m[1][0].toUpperCase() + m[1].slice(1).toLowerCase();
-    others[key] = parseFloat(m[2].replace(/,/g, ''));
-  }
-  return others;
 }
 
 /**
@@ -261,4 +189,4 @@ function parseExpenseEntry(text) {
   return { amount: isTopUp ? amount : -amount };
 }
 
-module.exports = { parseCashCount, parseTransaction, parseHiveEntry, parseExpenseEntry, parseDenominations };
+module.exports = { parseCashCount, parseTransaction, parseHiveEntry, parseExpenseEntry };

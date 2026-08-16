@@ -2,13 +2,9 @@
  * Computes expected closing totals from an opening cash count + a list of transactions,
  * then compares against the actual closing cash count.
  *
- * Company perspective — BUY/SELL always describes what PSULIT itself does,
- * for BOTH retail and wholesale tickets (confirmed against real data: a
- * retail "BUY 100USD" ticket means Psulit buys $100 FROM the client, paying
- * out PHP — not the client buying from Psulit). No sign-flip is applied for
- * wholesale tickets; they use the exact same convention as retail tickets.
- *  - "BUY"  => Psulit buys FCY (pays PHP) => company FCY up, PHP down
- *  - "SELL" => Psulit sells FCY (receives PHP) => company FCY down, PHP up
+ * Company perspective:
+ *  - Client "BUY"  => client buys FCY from company, pays PHP => company FCY down, PHP up
+ *  - Client "SELL" => counterparty sells FCY to company, company pays PHP => company FCY up, PHP down
  *
  * transactions: array from parse.parseTransaction (nulls filtered out)
  * opening / actual: totals objects from parse.parseCashCount, e.g. { USD: 123, PHP: 456.78, ... }
@@ -20,12 +16,21 @@ function reconcile(opening, actual, transactions, adjustments = {}) {
   for (const tx of transactions) {
     if (!tx || !tx.movements || !tx.movements.length) continue;
 
+    // Client tickets: BUY/SELL describes the CLIENT's action (client BUY = client
+    // buys FCY from Psulit => company FCY down, PHP up).
+    // Wholesale/corporate tickets: BUY/SELL describes what PSULIT itself did
+    // (Psulit SELL = Psulit sells FCY to the counterparty => company FCY down,
+    // PHP up) — the opposite mapping from client tickets for the same verb.
+    const effectiveAction = mv => (tx.isWholesale
+      ? (mv.action === 'SELL' ? 'BUY' : 'SELL')
+      : mv.action);
+
     for (const mv of tx.movements) {
-      const sign = mv.action === 'BUY' ? 1 : -1; // company FCY change
+      const sign = effectiveAction(mv) === 'BUY' ? -1 : 1; // company FCY change
       expected[mv.ccy] = (expected[mv.ccy] || 0) + sign * mv.fcyAmount;
     }
     if (tx.phpAmount != null) {
-      const phpSign = tx.movements[0].action === 'BUY' ? -1 : 1;
+      const phpSign = effectiveAction(tx.movements[0]) === 'BUY' ? 1 : -1;
       phpDelta += phpSign * tx.phpAmount;
     }
   }

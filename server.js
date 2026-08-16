@@ -3,9 +3,8 @@ const crypto = require('crypto');
 const axios = require('axios');
 const { parseCashCount, parseTransaction, parseHiveEntry, parseExpenseEntry } = require('./parse');
 const { reconcile } = require('./reconcile');
-const { history } = require('./slack');
+const { history, replyInThread, postMessage } = require('./slack');
 const { broadcast } = require('./telegram');
-const { onMorningOpeningPosted } = require('./openingDiscrepancyCheck');
 
 const app = express();
 
@@ -60,18 +59,9 @@ app.post('/slack/events', async (req, res) => {
 
   try {
     await handleCashCount(event, branchConfig);
+    await handleDailyReport(event, branchConfig);
   } catch (err) {
     console.error('Failed to process cash count:', err);
-  }
-
-  // Opening (8AM) discrepancy check — 24h cycle vs. the prior Morning Opening,
-  // pinpoints which shift/teller introduced each discrepancy, posts to Slack.
-  // Runs independently of handleCashCount above (which only acts on Closing
-  // counts) — onMorningOpeningPosted itself no-ops on any non-Morning report.
-  try {
-    await onMorningOpeningPosted(event, branchConfig);
-  } catch (err) {
-    console.error('Failed to process opening discrepancy check:', err);
   }
 });
 
@@ -254,6 +244,174 @@ function formatNum(n) {
 
 function subtractSecond(ts) {
   return (parseFloat(ts) - 0.000001).toFixed(6);
+}
+
+// Detects a Morning shift's OPENING count (near 9AM), as opposed to its close.
+function isMorningOpening(current) {
+  if (current.shift !== 'Morning') return false;
+  const timeMatch = (current.timestamp || '').match(/(\d{1,2}):(\d{2}):(\d{2})/);
+  if (!timeMatch) return false;
+  const hour = parseInt(timeMatch[1], 10) + parseInt(timeMatch[2], 10) / 60;
+  const diff = Math.min(Math.abs(hour - 9), 24 - Math.abs(hour - 9));
+  return diff <= 2; // within 2 hours of 9AM
+}
+
+// Compares denomination breakdowns between two counts for one currency/bucket and
+// returns the differences, largest-amount first — used to guess a specific root
+// cause (e.g. "13 fewer ₱200 bills") when no transactions occurred in the window.
+function diagnoseDenominations(openingDenoms = [], actualDenoms = []) {
+  const values = new Set([...openingDenoms.map(d => d.value), ...actualDenoms.map(d => d.value)]);
+  const diffs = [];
+  for (const v of values) {
+    const openCount = (openingDenoms.find(d => d.value === v) || { count: 0 }).count;
+    const actCount = (actualDenoms.find(d => d.value === v) || { count: 0 }).count;
+    const countDiff = actCount - openCount;
+    if (countDiff !== 0) diffs.push({ value: v, countDiff, amountDiff: countDiff * v });
+  }
+  diffs.sort((a, b) => Math.abs(b.amountDiff) - Math.abs(a.amountDiff));
+  return diffs;
+}
+
+function formatDenomLabel(value) {
+  if (value < 1) return `${Math.round(value * 100)}¢`;
+  return `₱${value.toLocaleString()}`;
+}
+
+// Daily discrepancy report: compares this Morning's opening count against
+// yesterday's Morning opening (a full 24-hour window), posted directly to Slack
+// with the relevant tellers @mentioned. This runs alongside (not instead of)
+// the Telegram reports from handleCashCount.
+async function handleDailyReport(event, branchConfig) {
+  const { cashCountChannelId, transactionsChannelId, hiveChannelId, expensesChannelId } = branchConfig;
+  const current = parseCashCount(event.text);
+  if (!current) return;
+
+  const isSolaireStyle = isMorningOpening(current);
+  const isAlphalandStyle = (current.shift || '').toLowerCase() === 'opening';
+  if (!isSolaireStyle && !isAlphalandStyle) return;
+
+  const priorMessages = await history(cashCountChannelId, { latest: subtractSecond(event.ts), limit: 100 });
+  let previous = null;
+  let previousMsg = null;
+  let windowStartMsg = null; // for Alphaland: the Opening count that begins the window
+
+  if (isSolaireStyle) {
+    // Solaire: compare today's Morning opening against yesterday's Morning opening
+    // (a continuous 24-hour window spanning the full close-to-open handover too).
+    for (const msg of priorMessages) {
+      const parsed = parseCashCount(msg.text || '');
+      if (parsed && parsed.branch === current.branch && isMorningOpening(parsed)) {
+        previous = parsed;
+        previousMsg = msg;
+        break; // newest-first
+      }
+    }
+    windowStartMsg = previousMsg;
+  } else {
+    // Alphaland: today's Opening count is just the trigger to send the report —
+    // the window itself is yesterday's own Opening-to-Closing (a single day-shift).
+    let closingMsg = null, closingParsed = null;
+    for (const msg of priorMessages) {
+      const parsed = parseCashCount(msg.text || '');
+      if (parsed && parsed.branch === current.branch && (parsed.shift || '').toLowerCase() === 'closing') {
+        closingMsg = msg;
+        closingParsed = parsed;
+        break;
+      }
+    }
+    if (!closingMsg) return; // no closing count yet to report on
+    for (const msg of priorMessages) {
+      if (parseFloat(msg.ts) >= parseFloat(closingMsg.ts)) continue; // must be before the closing
+      const parsed = parseCashCount(msg.text || '');
+      if (parsed && parsed.branch === current.branch && (parsed.shift || '').toLowerCase() === 'opening') {
+        previous = parsed;
+        previousMsg = msg;
+        break;
+      }
+    }
+    if (!previous) return; // no matching opening found for that closing
+    current.totals = closingParsed.totals; // report on yesterday's Opening->Closing, not today's fresh Opening
+    current.others = closingParsed.others;
+    current.denominations = closingParsed.denominations;
+    current.teller = closingParsed.teller;
+    current.timestamp = closingParsed.timestamp;
+    windowStartMsg = previousMsg;
+    event = { ...event, ts: closingMsg.ts, user: closingMsg.user }; // window ends at the closing count
+  }
+
+  if (!previous) return; // no prior period to compare against yet
+
+  const windowOldest = previousMsg.ts;
+  const windowLatest = event.ts;
+
+  // Pull everything posted in the 24-hour window, same as the shift reports.
+  const txMessages = await history(transactionsChannelId, { oldest: windowOldest, latest: windowLatest });
+  const txParsed = txMessages
+    .map(m => ({ parsed: parseTransaction(m.text || ''), raw: m.text || '', user: m.user }))
+    .filter(x => x.raw.match(/(?:VN|ARN|AR)\s*#?\s*0*\d+/i));
+  const goodTx = txParsed.filter(x => x.parsed).map(x => x.parsed);
+  const posters = new Set(txParsed.map(x => x.user).filter(Boolean));
+
+  let adjustments = {};
+  if (hiveChannelId) {
+    const hiveMessages = await history(hiveChannelId, { oldest: windowOldest, latest: windowLatest });
+    const hiveDelta = hiveMessages.map(m => parseHiveEntry(m.text || '')).filter(Boolean).reduce((s, e) => s + e.amount, 0);
+    if (hiveDelta !== 0) adjustments.Hive = hiveDelta;
+  }
+  if (expensesChannelId) {
+    const expenseMessages = await history(expensesChannelId, { oldest: windowOldest, latest: windowLatest });
+    const expenseTotal = expenseMessages.map(m => parseExpenseEntry(m.text || '')).filter(Boolean).reduce((s, e) => s + e.amount, 0);
+    if (expenseTotal !== 0) adjustments.Opex = expenseTotal;
+  }
+
+  const openingTotals = { ...previous.totals, ...previous.others };
+  const actualTotals = { ...current.totals, ...current.others };
+  const results = reconcile(openingTotals, actualTotals, goodTx, adjustments);
+  const mismatches = results.filter(r => !r.match);
+  if (mismatches.length === 0) return; // nothing to report — stay quiet
+
+  // Also collect whoever posted the two cash counts being compared.
+  if (previousMsg.user) posters.add(previousMsg.user);
+  if (event.user) posters.add(event.user);
+
+  const noTransactions = goodTx.length === 0 && txParsed.length === 0;
+  const dateLabel = (current.timestamp || '').split(',')[0].trim();
+  const prevTimeLabel = (previous.timestamp || '').split(',')[1]?.trim() || '';
+  const currTimeLabel = (current.timestamp || '').split(',')[1]?.trim() || '';
+
+  let lines = [];
+  lines.push(`*${current.branch} Discrepancy — ${dateLabel}, ${prevTimeLabel} → ${currTimeLabel}*`);
+  lines.push('');
+  for (const r of mismatches) {
+    let line = `• *${r.ccy}* off by ${formatNum(Math.abs(r.diff))}`;
+    if (noTransactions) {
+      const openDenoms = previous.denominations?.[r.ccy];
+      const actDenoms = current.denominations?.[r.ccy];
+      const diag = diagnoseDenominations(openDenoms, actDenoms);
+      if (diag.length) {
+        const top = diag[0];
+        const direction = top.countDiff < 0 ? 'not counted' : 'extra, unexplained';
+        line += ` — mainly ${Math.abs(top.countDiff)} × ${formatDenomLabel(top.value)} ${direction} (${formatNum(Math.abs(top.amountDiff))})`;
+      }
+    }
+    lines.push(line);
+  }
+  lines.push('');
+  lines.push(noTransactions
+    ? 'No transactions in the gap, so this isn\'t explained by a sale.'
+    : `${goodTx.length} transaction(s) checked in this window — still doesn't fully reconcile.`);
+  lines.push('Please explain.');
+
+  if (posters.size) {
+    lines.push('');
+    lines.push([...posters].map(u => `<@${u}>`).join(' '));
+  }
+
+  if (process.env.ENABLE_SLACK_DAILY_REPORT === 'true') {
+    await postMessage(cashCountChannelId, lines.join('\n'));
+  } else {
+    console.log('Slack daily report paused (ENABLE_SLACK_DAILY_REPORT is not "true") — would have posted:\n' + lines.join('\n'));
+  }
 }
 
 // Manila is UTC+8 year-round (no DST) — convert a Manila-local date/time to a
