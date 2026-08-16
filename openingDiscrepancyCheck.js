@@ -219,6 +219,11 @@ async function onMorningOpeningPosted(event, branchConfig) {
     userId: resolveTellerUserId(closingReport.teller),
     shift: closingReport.shift,
   };
+  const openingResponsible = {
+    teller: opening.teller,
+    userId: resolveTellerUserId(opening.teller),
+    shift: opening.shift,
+  };
 
   if (enabledChecks.includes('overnight')) {
     // Raw diff: closingReport (before) vs opening (after) — the overnight
@@ -228,11 +233,18 @@ async function onMorningOpeningPosted(event, branchConfig) {
     totalFindings = diffTotals(beforeTotals, afterTotals);
     denomFindings = diffDenominations(closingReport.denoms, opening.denoms);
 
-    // Attribute every finding to the CLOSING teller directly (not via
-    // pinpointShift) — with only two points, a changed value means the
-    // closing count was the wrong one, so responsibility is theirs.
+    // Attribute each finding to whichever teller's report actually deviates
+    // from the other. Something NEW at opening (missing/variance where
+    // opening added or changed a value) or a straightforward variance is the
+    // CLOSING teller's responsibility — their count is presumed correct as
+    // the final tally before handover, so a difference means their own
+    // count didn't match. But "disappeared" is the mirror case: closing
+    // correctly had it, opening failed to carry it forward — that's the
+    // OPENING teller's responsibility, not closing's.
     for (const f of denomFindings) f.responsibleTeller = closingResponsible;
-    for (const f of totalFindings) f.responsibleTeller = closingResponsible;
+    for (const f of totalFindings) {
+      f.responsibleTeller = (f.type === 'disappeared') ? openingResponsible : closingResponsible;
+    }
   }
 
   if (enabledChecks.includes('businessDay')) {
@@ -341,6 +353,12 @@ function diffTotals(baselineTotals, openingTotals) {
     const after = openingTotals[ccy];
     if (before === undefined && after !== undefined) {
       findings.push({ type: 'missing', ccy, after });
+    } else if (before !== undefined && after === undefined) {
+      // The mirror case: something present before is now ENTIRELY absent —
+      // not just zero, but missing from the report altogether (e.g. Hive
+      // vanishing from an opening report). Just as important to catch as
+      // the "appeared out of nowhere" case above.
+      findings.push({ type: 'disappeared', ccy, before });
     } else if (before !== undefined && after !== undefined && Math.abs(before - after) > 0.005) {
       findings.push({ type: 'variance', ccy, before, after, diff: after - before });
     }
@@ -432,6 +450,8 @@ function buildExplainMessage(branch, closingReport, opening, totalFindings, deno
     for (const f of totalFindings) {
       if (f.type === 'missing') {
         lines.push(`${n++}. ${tagFor(f.responsibleTeller)} — why ${f.ccy} wasn't in your closing count (present at opening: ${formatAmt(f.after)})`);
+      } else if (f.type === 'disappeared') {
+        lines.push(`${n++}. ${tagFor(f.responsibleTeller)} — ${f.ccy} was ${formatAmt(f.before)} at closing but is missing entirely from the opening count. Was it not counted, or genuinely not there?`);
       } else {
         const direction = f.diff > 0 ? 'more' : 'less';
         lines.push(`${n++}. ${tagFor(f.responsibleTeller)} — ${f.ccy} is ${formatAmt(Math.abs(f.diff))} ${direction} at opening than at closing. Where did this come from?`);

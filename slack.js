@@ -13,13 +13,29 @@ function client() {
   });
 }
 
-// Fetches message history for a channel between two timestamps (exclusive of `latest`).
+// Fetches message history for a channel between two timestamps (inclusive).
+// Auto-paginates through Slack's cursor until ALL messages in the requested
+// window are retrieved — a busy day with hundreds of transactions should
+// never be silently truncated. `limit` here just controls the page size per
+// API call, not a cap on the total returned.
 async function history(channelId, { oldest, latest, limit = 200 } = {}) {
-  const res = await client().get('/conversations.history', {
-    params: { channel: channelId, oldest, latest, limit, inclusive: true }
-  });
-  if (!res.data.ok) throw new Error(`Slack history error: ${res.data.error}`);
-  return res.data.messages || [];
+  let allMessages = [];
+  let cursor = undefined;
+  let hasMore = true;
+
+  while (hasMore) {
+    const params = { channel: channelId, oldest, latest, limit, inclusive: true };
+    if (cursor) params.cursor = cursor;
+
+    const res = await client().get('/conversations.history', { params });
+    if (!res.data.ok) throw new Error(`Slack history error: ${res.data.error}`);
+
+    allMessages = allMessages.concat(res.data.messages || []);
+    hasMore = !!(res.data.has_more && res.data.response_metadata && res.data.response_metadata.next_cursor);
+    cursor = hasMore ? res.data.response_metadata.next_cursor : undefined;
+  }
+
+  return allMessages;
 }
 
 // Posts a threaded reply on a message.
