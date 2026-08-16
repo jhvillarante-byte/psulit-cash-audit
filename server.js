@@ -246,9 +246,10 @@ function subtractSecond(ts) {
   return (parseFloat(ts) - 0.000001).toFixed(6);
 }
 
-// Detects a Morning shift's OPENING count (near 9AM), as opposed to its close.
+// Detects a Morning shift's OPENING count, as opposed to its close.
 function isMorningOpening(current) {
   if (current.shift !== 'Morning') return false;
+  if (current.phase) return current.phase.toLowerCase() === 'opening'; // explicit — trust it
   const timeMatch = (current.timestamp || '').match(/(\d{1,2}):(\d{2}):(\d{2})/);
   if (!timeMatch) return false;
   const hour = parseInt(timeMatch[1], 10) + parseInt(timeMatch[2], 10) / 60;
@@ -287,7 +288,10 @@ async function handleDailyReport(event, branchConfig) {
   if (!current) return;
 
   const isSolaireStyle = isMorningOpening(current);
-  const isAlphalandStyle = (current.shift || '').toLowerCase() === 'opening';
+  const isAlphalandStyle = !isSolaireStyle && (
+    (current.shift || '').toLowerCase() === 'opening' ||
+    (current.phase || '').toLowerCase() === 'opening'
+  );
   if (!isSolaireStyle && !isAlphalandStyle) return;
 
   const priorMessages = await history(cashCountChannelId, { latest: subtractSecond(event.ts), limit: 100 });
@@ -313,7 +317,8 @@ async function handleDailyReport(event, branchConfig) {
     let closingMsg = null, closingParsed = null;
     for (const msg of priorMessages) {
       const parsed = parseCashCount(msg.text || '');
-      if (parsed && parsed.branch === current.branch && (parsed.shift || '').toLowerCase() === 'closing') {
+      const isClose = parsed && ((parsed.shift || '').toLowerCase() === 'closing' || (parsed.phase || '').toLowerCase() === 'closing');
+      if (parsed && parsed.branch === current.branch && isClose) {
         closingMsg = msg;
         closingParsed = parsed;
         break;
@@ -323,7 +328,8 @@ async function handleDailyReport(event, branchConfig) {
     for (const msg of priorMessages) {
       if (parseFloat(msg.ts) >= parseFloat(closingMsg.ts)) continue; // must be before the closing
       const parsed = parseCashCount(msg.text || '');
-      if (parsed && parsed.branch === current.branch && (parsed.shift || '').toLowerCase() === 'opening') {
+      const isOpen = parsed && ((parsed.shift || '').toLowerCase() === 'opening' || (parsed.phase || '').toLowerCase() === 'opening');
+      if (parsed && parsed.branch === current.branch && isOpen) {
         previous = parsed;
         previousMsg = msg;
         break;
@@ -443,8 +449,9 @@ const CLOSE_WINDOW_HOURS = 2; // tolerance either side of the scheduled end time
 
 function isClosingCount(current) {
   if (!current.shift) return false;
-  if (current.shift === 'Morning') return false;
-  if (/close/i.test(current.shift)) return true; // explicit label (e.g. Alphaland "Closing")
+  if (current.shift === 'Morning') return false; // always skip — Mid-Shift's close covers this ground
+  if (current.phase) return current.phase.toLowerCase() === 'closing'; // explicit — trust it
+  if (/close/i.test(current.shift)) return true; // explicit label in the shift name itself
 
   const endHour = SHIFT_END_HOUR[current.shift];
   if (endHour == null) return true; // unknown shift label — report it rather than silently drop it

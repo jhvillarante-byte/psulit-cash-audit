@@ -25,7 +25,18 @@ function parseCashCount(text) {
   if (!text || !text.includes('PSULIT CASH COUNT REPORT')) return null;
 
   const branch = matchOne(text, /\*Branch:\*\s*(.+)/);
-  const shift = matchOne(text, /\*Shift:\*\s*(.+)/);
+  const rawShift = matchOne(text, /\*Shift:\*\s*(.+)/);
+  // Newer app versions append an explicit phase, e.g. "Morning (Opening)" or
+  // "Mid-Shift (Closing)". Split that out so shift stays just "Morning"/"Mid-Shift"
+  // and phase captures "Opening"/"Closing" when the app provides it (older
+  // messages, and Alphaland pre-refresh, have no phase — phase stays null).
+  let shift = rawShift;
+  let phase = null;
+  const phaseMatch = (rawShift || '').match(/^(.+?)\s*\((Opening|Closing)\)\s*$/i);
+  if (phaseMatch) {
+    shift = phaseMatch[1].trim();
+    phase = phaseMatch[2];
+  }
   const teller = matchOne(text, /\*Teller:\*\s*(.+)/);
   const timestamp = matchOne(text, /\*Timestamp:\*\s*(.+)/);
   const refCode = matchOne(text, /\*Ref Code:\*\s*(.+)/);
@@ -38,7 +49,7 @@ function parseCashCount(text) {
   const others = extractNamedBlocks(othersSection);
 
   return {
-    branch, shift, teller, timestamp, refCode,
+    branch, shift, phase, teller, timestamp, refCode,
     totals: forex.totals,
     others: others.totals,
     denominations: { ...forex.denominations, ...others.denominations }
