@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const axios = require('axios');
 const { parseCashCount, parseTransaction, parseHiveEntry, parseExpenseEntry } = require('./parse');
 const { reconcile } = require('./reconcile');
-const { history, replyInThread, postMessage } = require('./slack');
+const { history, replyInThread, postMessage, recoverFromReceiptImage, deepCheckMismatches } = require('./slack');
 const { broadcast } = require('./telegram');
 
 const app = express();
@@ -116,10 +116,26 @@ async function handleCashCount(event, branchConfig) {
     oldest: windowStart,
     latest: event.ts
   });
-  const transactions = txMessages
-    .map(m => ({ parsed: parseTransaction(m.text || ''), raw: m.text || '' }))
-    .filter(x => x.raw.match(/(?:VN|ARN|AR)\s*#?\s*0*\d+/i)) // looks like a ticket at all
-    .map(x => x.parsed ? x.parsed : { unparseable: true, raw: x.raw });
+  const rawTickets = txMessages
+    .map(m => ({ parsed: parseTransaction(m.text || ''), raw: m.text || '', files: m.files || [] }))
+    .filter(x => x.raw.match(/(?:VN|ARN|AR)\s*#?\s*0*\d+/i)); // looks like a ticket at all
+
+  // For tickets whose caption alone didn't parse, try reading the attached
+  // receipt photo instead of giving up on them entirely.
+  const transactions = [];
+  for (const t of rawTickets) {
+    if (t.parsed) { transactions.push(t.parsed); continue; }
+    const photo = t.files.find(f => (f.mimetype || '').startsWith('image/'));
+    let recovered = null;
+    if (photo && photo.url_private) {
+      try {
+        recovered = await recoverFromReceiptImage(photo.url_private, t.raw);
+      } catch (err) {
+        console.error('Receipt image recovery failed:', err.message);
+      }
+    }
+    transactions.push(recovered || { unparseable: true, raw: t.raw });
+  }
 
   const goodTransactions = transactions.filter(t => !t.unparseable);
   const badTransactions = transactions.filter(t => t.unparseable);
@@ -162,7 +178,17 @@ async function handleCashCount(event, branchConfig) {
     }
   }
 
-  await broadcast(RECIPIENT_CHAT_IDS, formatReport(current, annotated, goodTransactions, badTransactions, morningTeller));
+  let deepCheck = null;
+  const stillMismatched = annotated.filter(r => !r.match);
+  if (stillMismatched.length) {
+    try {
+      deepCheck = await deepCheckMismatches(stillMismatched, goodTransactions, badTransactions);
+    } catch (err) {
+      console.error('Deep-check failed:', err.message);
+    }
+  }
+
+  await broadcast(RECIPIENT_CHAT_IDS, formatReport(current, annotated, goodTransactions, badTransactions, morningTeller, deepCheck));
 }
 
 // Compares this shift's results against any open flags from prior shifts for this branch.
@@ -190,7 +216,7 @@ function annotateWithFlagHistory(results, current) {
   });
 }
 
-function formatReport(current, results, transactions, badTransactions = [], morningTeller = null) {
+function formatReport(current, results, transactions, badTransactions = [], morningTeller = null, deepCheck = null) {
   const mismatches = results.filter(r => !r.match);
   const clientTx = transactions.filter(t => !t.isWholesale);
   const wholesaleTx = transactions.filter(t => t.isWholesale);
@@ -206,6 +232,10 @@ function formatReport(current, results, transactions, badTransactions = [], morn
     lines.push(`Teller: ${current.teller || 'n/a'}`);
   }
   lines.push(`${clientTx.length} client transaction(s)${wholesaleTx.length ? `, ${wholesaleTx.length} wholesale` : ''} checked since the last count.`);
+  const recovered = transactions.filter(t => t.recoveredFromImage);
+  if (recovered.length) {
+    lines.push(`(${recovered.length} of these had no caption details — recovered by reading the receipt photo.)`);
+  }
   lines.push('');
 
   const needsAttention = results.filter(r => !r.match || r.note);
@@ -231,6 +261,12 @@ function formatReport(current, results, transactions, badTransactions = [], morn
     for (const bad of badTransactions) {
       lines.push(`  • ${bad.raw.split('\n')[0].slice(0, 80)}`);
     }
+  }
+
+  if (deepCheck) {
+    lines.push('');
+    lines.push('🔍 *Second look at the mismatches:*');
+    lines.push(deepCheck.trim());
   }
 
   lines.push('_Auto-generated from logged tickets — please verify against physical slips before treating as final._');
