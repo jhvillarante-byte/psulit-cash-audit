@@ -1,3 +1,4 @@
+const { registerTestRoutes } = require('./test-routes');
 const { runShiftAudit, runCloseVsOpenCheck, isScheduledOpening, isScheduledClosing } = require('./audit');
 const express = require('express');
 const crypto = require('crypto');
@@ -8,7 +9,7 @@ const { history, replyInThread, postMessage, recoverFromReceiptImage, deepCheckM
 const { broadcast } = require('./telegram');
 
 const app = express();
-
+registerTestRoutes(app, BRANCHES);
 const SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET;
 const RECIPIENT_CHAT_IDS = (process.env.TELEGRAM_CHAT_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
 
