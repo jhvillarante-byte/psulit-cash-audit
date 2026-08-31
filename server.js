@@ -1,3 +1,4 @@
+const { runShiftAudit, runCloseVsOpenCheck, isScheduledOpening, isScheduledClosing } = require('./audit');
 const express = require('express');
 const crypto = require('crypto');
 const axios = require('axios');
@@ -70,6 +71,11 @@ async function handleCashCount(event, branchConfig) {
   const current = parseCashCount(event.text);
   if (!current) return;
   if (!isClosingCount(current)) return; // only report once per shift, at close-out
+
+// New schedule-aware audit (runs alongside the existing Telegram report below)
+if (isScheduledClosing(current)) {
+  await runShiftAudit(event, current, branchConfig).catch(err => console.error('Shift audit failed:', err));
+}
 
   const eventTime = parseReportTimestamp(current);
   if (!eventTime) return;
@@ -322,6 +328,10 @@ async function handleDailyReport(event, branchConfig) {
   const { cashCountChannelId, transactionsChannelId, hiveChannelId, expensesChannelId } = branchConfig;
   const current = parseCashCount(event.text);
   if (!current) return;
+
+  if (isScheduledOpening(current)) {
+    await runCloseVsOpenCheck(event, current, branchConfig).catch(err => console.error('Handover check failed:', err));
+  }
 
   const isSolaireStyle = isMorningOpening(current);
   const isAlphalandStyle = !isSolaireStyle && (
