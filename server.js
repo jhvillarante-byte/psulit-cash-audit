@@ -9,7 +9,6 @@ const { history, replyInThread, postMessage, recoverFromReceiptImage, deepCheckM
 const { broadcast } = require('./telegram');
 
 const app = express();
-registerTestRoutes(app, BRANCHES);
 const SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET;
 const RECIPIENT_CHAT_IDS = (process.env.TELEGRAM_CHAT_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
 
@@ -21,6 +20,7 @@ const BRANCHES = (process.env.BRANCHES || '').split(',').filter(Boolean).map(ent
   return { name, cashCountChannelId, transactionsChannelId, hiveChannelId: hiveChannelId || null, expensesChannelId: expensesChannelId || null };
 });
 const BY_CASH_COUNT_CHANNEL = new Map(BRANCHES.map(b => [b.cashCountChannelId, b]));
+registerTestRoutes(app, BRANCHES);
 const PROCESSED = new Set(); // dedupe Slack's at-least-once delivery retries
 // Tracks unresolved discrepancies per branch+currency, so we can note when a later
 // shift's count comes back in balance (i.e. the issue didn't recur / was corrected).
