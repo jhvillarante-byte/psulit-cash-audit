@@ -44,7 +44,12 @@ const CCY_EMOJI = {
 /* REPORT 1 — closing: transactions vs closing count                   */
 /* ------------------------------------------------------------------ */
 
-async function runShiftAudit(closingEvent, closingCount, branchConfig) {
+/**
+ * dryRun: when true, returns the report text instead of posting it to Slack,
+ * and does NOT mutate OPEN_FLAGS (a dry run shouldn't affect what the next
+ * real report considers "already flagged" / "newly resolved").
+ */
+async function runShiftAudit(closingEvent, closingCount, branchConfig, { dryRun = false } = {}) {
   const { cashCountChannelId, transactionsChannelId } = branchConfig;
 
   try {
@@ -53,10 +58,10 @@ async function runShiftAudit(closingEvent, closingCount, branchConfig) {
     );
 
     if (!openingCount) {
-      await postMessage(cashCountChannelId,
-        `⚠️ *Shift Audit — ${branchConfig.name}*\n` +
-        `No opening count found for this shift (${windowLabel(closingCount)}) — can't check this one.`
-      );
+      const msg = `⚠️ *Shift Audit — ${branchConfig.name}*\n` +
+        `No opening count found for this shift (${windowLabel(closingCount)}) — can't check this one.`;
+      if (dryRun) return msg;
+      await postMessage(cashCountChannelId, msg);
       return;
     }
 
@@ -75,16 +80,18 @@ async function runShiftAudit(closingEvent, closingCount, branchConfig) {
     const closingTotals = { ...closingCount.totals, ...closingCount.others };
     const results = reconcile(openingTotals, closingTotals, tickets.map(t => t.parsed), {});
 
-    await postMessage(cashCountChannelId, buildShiftAuditReport({
-      branchConfig, closingCount, openingCount, results, tickets
-    }));
+    const report = buildShiftAuditReport({
+      branchConfig, closingCount, openingCount, results, tickets, dryRun
+    });
+
+    if (dryRun) return report;
+    await postMessage(cashCountChannelId, report);
 
   } catch (err) {
     console.error('runShiftAudit error:', err);
-    await postMessage(
-      branchConfig.cashCountChannelId,
-      `⚠️ Audit bot error for ${branchConfig.name}: ${err.message}`
-    ).catch(() => {});
+    const msg = `⚠️ Audit bot error for ${branchConfig.name}: ${err.message}\n\n${err.stack || ''}`;
+    if (dryRun) return msg;
+    await postMessage(branchConfig.cashCountChannelId, msg).catch(() => {});
   }
 }
 
@@ -92,7 +99,7 @@ async function runShiftAudit(closingEvent, closingCount, branchConfig) {
 /* REPORT 2 — opening: previous closing vs this opening                */
 /* ------------------------------------------------------------------ */
 
-async function runCloseVsOpenCheck(openingEvent, openingCount, branchConfig) {
+async function runCloseVsOpenCheck(openingEvent, openingCount, branchConfig, { dryRun = false } = {}) {
   const { cashCountChannelId, transactionsChannelId } = branchConfig;
 
   try {
@@ -101,9 +108,9 @@ async function runCloseVsOpenCheck(openingEvent, openingCount, branchConfig) {
     );
 
     if (!closingCount) {
-      await postMessage(cashCountChannelId,
-        `⚠️ *Handover Check — ${branchConfig.name}*\nNo prior closing count found to compare against.`
-      );
+      const msg = `⚠️ *Handover Check — ${branchConfig.name}*\nNo prior closing count found to compare against.`;
+      if (dryRun) return msg;
+      await postMessage(cashCountChannelId, msg);
       return;
     }
 
@@ -139,7 +146,7 @@ async function runCloseVsOpenCheck(openingEvent, openingCount, branchConfig) {
       });
     }
 
-    await postMessage(cashCountChannelId, buildQuestionReport({
+    const report = buildQuestionReport({
       branchConfig,
       title: 'HANDOVER CHECK',
       dateLabel: (openingCount.timestamp || '').split(',')[0].trim(),
@@ -148,15 +155,18 @@ async function runCloseVsOpenCheck(openingEvent, openingCount, branchConfig) {
       closingTeller: openingCount.teller,   // who received
       txCount: gapTickets.length,
       txLabel: 'transaction(s) posted in the gap',
-      results: asResults
-    }));
+      results: asResults,
+      dryRun
+    });
+
+    if (dryRun) return report;
+    await postMessage(cashCountChannelId, report);
 
   } catch (err) {
     console.error('runCloseVsOpenCheck error:', err);
-    await postMessage(
-      branchConfig.cashCountChannelId,
-      `⚠️ Audit bot error (handover) for ${branchConfig.name}: ${err.message}`
-    ).catch(() => {});
+    const msg = `⚠️ Audit bot error (handover) for ${branchConfig.name}: ${err.message}\n\n${err.stack || ''}`;
+    if (dryRun) return msg;
+    await postMessage(branchConfig.cashCountChannelId, msg).catch(() => {});
   }
 }
 
@@ -164,14 +174,37 @@ async function runCloseVsOpenCheck(openingEvent, openingCount, branchConfig) {
 /* helpers                                                             */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Walks back through the cash count channel looking for the most recent
+ * message matching `predicate` for the same branch. Pages through Slack's
+ * history in batches rather than a single fixed-size call — a channel busy
+ * enough to post 100+ messages between one shift's open and close (cash
+ * count confirmations, CCTV notices, etc. all count) would otherwise push
+ * the count we're looking for past a single page and we'd wrongly report
+ * "no opening count found" even though one genuinely exists.
+ */
 async function findPriorCount(channelId, beforeTs, referenceCount, predicate) {
-  const msgs = await history(channelId, { latest: beforeTs, limit: 100 });
-  for (const msg of msgs) {
-    const parsed = parseCashCount(msg.text || '');
-    if (!parsed) continue;
-    if (parsed.branch !== referenceCount.branch) continue;
-    if (!predicate(parsed)) continue;
-    return { ...parsed, _ts: msg.ts };
+  const PAGE_SIZE = 200;
+  const MAX_PAGES = 10; // hard ceiling — 2,000 messages back is well past any
+                         // realistic single-shift gap; stop rather than loop forever
+                         // if something is fundamentally wrong (e.g. wrong channel).
+
+  let latest = beforeTs;
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const msgs = await history(channelId, { latest, limit: PAGE_SIZE });
+    if (msgs.length === 0) break;
+
+    for (const msg of msgs) {
+      const parsed = parseCashCount(msg.text || '');
+      if (!parsed) continue;
+      if (parsed.branch !== referenceCount.branch) continue;
+      if (!predicate(parsed)) continue;
+      return { ...parsed, _ts: msg.ts };
+    }
+
+    if (msgs.length < PAGE_SIZE) break; // reached the actual start of the channel
+    // msgs is newest-first, so the oldest ts in this page becomes the next page's boundary
+    latest = (parseFloat(msgs[msgs.length - 1].ts) - 0.000001).toFixed(6);
   }
   return null;
 }
@@ -267,7 +300,7 @@ function buildQuestionBlock(ccy, diff, tickets) {
  * back in balance (announcing the resolution), and tags anything still off
  * as either new or "still unresolved since <date>".
  */
-function annotateFlags(branch, results, dateLabel) {
+function annotateFlags(branch, results, dateLabel, dryRun = false) {
   const stillOpen = [];
   const resolved = [];
 
@@ -277,7 +310,7 @@ function annotateFlags(branch, results, dateLabel) {
 
     if (r.match) {
       if (prior) {
-        OPEN_FLAGS.delete(key);
+        if (!dryRun) OPEN_FLAGS.delete(key);
         resolved.push({ ccy: r.ccy, since: prior.firstFlaggedLabel });
       }
       continue;
@@ -286,19 +319,20 @@ function annotateFlags(branch, results, dateLabel) {
     if (prior) {
       stillOpen.push({ ...r, since: prior.firstFlaggedLabel });
     } else {
-      OPEN_FLAGS.set(key, { diff: r.diff, firstFlaggedLabel: dateLabel });
-      stillOpen.push({ ...r, since: null });
+      if (!dryRun) OPEN_FLAGS.set(key, { diff: r.diff, firstFlaggedLabel: dateLabel });
+      stillOpen.push({ ...r, since: dryRun ? '(would be newly flagged)' : null });
     }
   }
 
   return { stillOpen, resolved };
 }
 
-function buildShiftAuditReport({ branchConfig, closingCount, openingCount, results, tickets }) {
+function buildShiftAuditReport({ branchConfig, closingCount, openingCount, results, tickets, dryRun = false }) {
   const dateLabel = (closingCount.timestamp || '').split(',')[0].trim();
-  const { stillOpen, resolved } = annotateFlags(branchConfig.name, results, dateLabel);
+  const { stillOpen, resolved } = annotateFlags(branchConfig.name, results, dateLabel, dryRun);
 
   const lines = [];
+  if (dryRun) lines.push('_[DRY RUN — not posted to Slack]_');
   lines.push(`🔍 *SHIFT AUDIT — ${branchConfig.name}*`);
   lines.push(`📅 ${dateLabel} | ${windowLabel(closingCount)}`);
   lines.push(`${openingCount.teller || '?'} (opening) ${closingCount.teller || '?'} (closing)`);
@@ -318,7 +352,11 @@ function buildShiftAuditReport({ branchConfig, closingCount, openingCount, resul
     lines.push('');
     for (const r of stillOpen) {
       lines.push(buildQuestionBlock(r.ccy, r.diff, tickets));
-      if (r.since) lines.push(`   _(Still unresolved since ${r.since} — please check.)_`);
+      if (r.since === '(would be newly flagged)') {
+        lines.push(`   _(Would be newly flagged as of this report.)_`);
+      } else if (r.since) {
+        lines.push(`   _(Still unresolved since ${r.since} — please check.)_`);
+      }
       lines.push('');
     }
   }
@@ -335,11 +373,12 @@ function buildShiftAuditReport({ branchConfig, closingCount, openingCount, resul
 }
 
 function buildQuestionReport({ branchConfig, title, dateLabel, windowText, openingTeller,
-  closingTeller, txCount, txLabel, results }) {
+  closingTeller, txCount, txLabel, results, dryRun = false }) {
 
-  const { stillOpen, resolved } = annotateFlags(branchConfig.name, results, dateLabel);
+  const { stillOpen, resolved } = annotateFlags(branchConfig.name, results, dateLabel, dryRun);
 
   const lines = [];
+  if (dryRun) lines.push('_[DRY RUN — not posted to Slack]_');
   lines.push(`🔄 *${title} — ${branchConfig.name}*`);
   lines.push(`📅 ${dateLabel} | ${windowText}`);
   lines.push(`${openingTeller || '?'} → ${closingTeller || '?'}`);
@@ -361,7 +400,11 @@ function buildQuestionReport({ branchConfig, title, dateLabel, windowText, openi
       const label = moneyLabel(r.ccy, Math.abs(r.diff));
       const phrase = short ? `is short by ${label}` : `has ${label} extra than expected`;
       lines.push(`${emoji} *${r.ccy}* ${phrase}. Can you check what happened between the two counts?`);
-      if (r.since) lines.push(`   _(Still unresolved since ${r.since}.)_`);
+      if (r.since === '(would be newly flagged)') {
+        lines.push(`   _(Would be newly flagged as of this report.)_`);
+      } else if (r.since) {
+        lines.push(`   _(Still unresolved since ${r.since}.)_`);
+      }
       lines.push('');
     }
   }
