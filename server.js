@@ -1,4 +1,7 @@
 const { registerTestRoutes } = require('./test-routes');
+const { registerTestRoutes } = require('./test-routes');
+const { registerDebugRoutes } = require('./debug-routes');    // ← ADD THIS LINE
+const { runShiftAudit, runCloseVsOpenCheck, isScheduledOpening, isScheduledClosing } = require('./audit');
 const { runShiftAudit, runCloseVsOpenCheck, isScheduledOpening, isScheduledClosing } = require('./audit');
 const express = require('express');
 const crypto = require('crypto');
@@ -21,6 +24,10 @@ const BRANCHES = (process.env.BRANCHES || '').split(',').filter(Boolean).map(ent
 });
 const BY_CASH_COUNT_CHANNEL = new Map(BRANCHES.map(b => [b.cashCountChannelId, b]));
 registerTestRoutes(app, BRANCHES);
+registerTestRoutes(app, BRANCHES);
+registerDebugRoutes(app, BRANCHES);    // ← ADD THIS LINE
+registerTestRoutes(app, BRANCHES);
+registerDebugRoutes(app, BRANCHES);    // ← ADD THIS LINE
 const PROCESSED = new Set(); // dedupe Slack's at-least-once delivery retries
 // Tracks unresolved discrepancies per branch+currency, so we can note when a later
 // shift's count comes back in balance (i.e. the issue didn't recur / was corrected).
