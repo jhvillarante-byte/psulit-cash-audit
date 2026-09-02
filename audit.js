@@ -309,15 +309,21 @@ function buildQuestionBlock(ccy, diff, tickets) {
     const shown = sorted.slice(0, 3);
     for (const t of shown) {
       const who = t.parsed.isWholesale ? 'wholesale' : (clientLabel(t.raw) || 'client');
+      // Ticket convention (confirmed, identical for retail and wholesale —
+      // no perspective flip needed either way, matching reconcile.js exactly):
+      //   BUY  = the counterparty hands Psulit that FX, Psulit hands back PHP
+      //          -> Psulit's FX stock UP, Psulit's PHP DOWN.
+      //   SELL = Psulit hands the counterparty that FX, they hand back PHP
+      //          -> Psulit's FX stock DOWN, Psulit's PHP UP.
       if (ccy === 'PHP') {
-        // PHP has no per-ticket movements entry — describe it via the PHP amount
-        // and the ticket's primary action instead (same convention reconcile.js uses).
+        // PHP has no per-ticket movements entry — describe it via the PHP
+        // amount and the ticket's primary action (same convention as reconcile.js).
         const primary = t.parsed.movements[0];
         const verb = primary && primary.action === 'BUY' ? 'Paid out' : 'Received';
         lines.push(`   – ${verb} ${moneyLabel('PHP', t.parsed.phpAmount)} (${who}) at ${timeLabel(t.ts)}`);
       } else {
         const mv = t.parsed.movements.find(m => m.ccy === ccy);
-        lines.push(`   – ${mv.action === 'BUY' ? 'Bought' : 'Sold'} ${fmt(mv.fcyAmount)} ${ccy} (${who}) at ${timeLabel(t.ts)}`);
+        lines.push(`   – ${mv.action === 'BUY' ? 'Received' : 'Gave out'} ${fmt(mv.fcyAmount)} ${ccy} (${who}) at ${timeLabel(t.ts)}`);
       }
     }
     if (sorted.length > shown.length) {

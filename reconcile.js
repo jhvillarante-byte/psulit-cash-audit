@@ -2,9 +2,15 @@
  * Computes expected closing totals from an opening cash count + a list of transactions,
  * then compares against the actual closing cash count.
  *
- * Company perspective:
- *  - Client "BUY"  => client buys FCY from company, pays PHP => company FCY down, PHP up
- *  - Client "SELL" => counterparty sells FCY to company, company pays PHP => company FCY up, PHP down
+ * Ticket convention (confirmed against real money-changer usage — same for
+ * BOTH retail client tickets and wholesale/corporate tickets, no distinction
+ * needed):
+ *   "BUY <amount> <CCY>"  => the counterparty hands Psulit that FX, Psulit
+ *                            hands back PHP => Psulit's FX stock goes UP,
+ *                            Psulit's PHP goes DOWN.
+ *   "SELL <amount> <CCY>" => Psulit hands the counterparty that FX, the
+ *                            counterparty hands back PHP => Psulit's FX
+ *                            stock goes DOWN, Psulit's PHP goes UP.
  *
  * transactions: array from parse.parseTransaction (nulls filtered out)
  * opening / actual: totals objects from parse.parseCashCount, e.g. { USD: 123, PHP: 456.78, ... }
@@ -16,21 +22,17 @@ function reconcile(opening, actual, transactions, adjustments = {}) {
   for (const tx of transactions) {
     if (!tx || !tx.movements || !tx.movements.length) continue;
 
-    // Client tickets: BUY/SELL describes the CLIENT's action (client BUY = client
-    // buys FCY from Psulit => company FCY down, PHP up).
-    // Wholesale/corporate tickets: BUY/SELL describes what PSULIT itself did
-    // (Psulit SELL = Psulit sells FCY to the counterparty => company FCY down,
-    // PHP up) — the opposite mapping from client tickets for the same verb.
-    const effectiveAction = mv => (tx.isWholesale
-      ? (mv.action === 'SELL' ? 'BUY' : 'SELL')
-      : mv.action);
-
+    // BUY = Psulit's FX stock increases (Psulit received the FX).
+    // SELL = Psulit's FX stock decreases (Psulit gave the FX away).
+    // This holds identically for retail and wholesale/corporate tickets —
+    // there is no separate "counterparty perspective" to flip.
     for (const mv of tx.movements) {
-      const sign = effectiveAction(mv) === 'BUY' ? -1 : 1; // company FCY change
+      const sign = mv.action === 'BUY' ? 1 : -1;
       expected[mv.ccy] = (expected[mv.ccy] || 0) + sign * mv.fcyAmount;
     }
     if (tx.phpAmount != null) {
-      const phpSign = effectiveAction(tx.movements[0]) === 'BUY' ? 1 : -1;
+      // PHP moves opposite to the FX side: BUY pays PHP out (-), SELL takes PHP in (+).
+      const phpSign = tx.movements[0].action === 'BUY' ? -1 : 1;
       phpDelta += phpSign * tx.phpAmount;
     }
   }
