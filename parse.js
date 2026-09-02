@@ -1,6 +1,13 @@
 // Parses the two message formats we get from Slack:
 //  1. "PSULIT CASH COUNT REPORT" - posted by the Psulit Cash Count bot
 //  2. Transaction tickets (VN ##### / AR #####) - posted by tellers
+//
+// NOTE on field labels: only a handful of lines in the real messages are
+// wrapped in literal *asterisks* (the title, "Grand Total", "Submitted &
+// Locked") — those come through Slack's rich_text bold styling as plain
+// unmarked text in msg.text. Field labels like "Branch:", "Shift:",
+// "Teller:", "Timestamp:" are NOT asterisk-wrapped in the real messages, so
+// the extraction regexes below must not require asterisks around them.
 
 const CCY_LINE = /:flag-[a-z]+:\s*\*([A-Z]{3})[^*]*\*|:([a-z]{2}):\s*\*([A-Z]{3})[^*]*\*/g;
 const SUBTOTAL_LINE = /\*Subtotal:\s*([^\d\-.,]*)\s*([\d,]+\.?\d*)\*/;
@@ -24,8 +31,10 @@ const SYMBOL_TO_CCY = {
 function parseCashCount(text) {
   if (!text || !text.includes('PSULIT CASH COUNT REPORT')) return null;
 
-  const branch = matchOne(text, /\*Branch:\*\s*(.+)/);
-  const rawShift = matchOne(text, /\*Shift:\*\s*(.+)/);
+  // Field labels are plain text in the real messages (no surrounding
+  // asterisks) — only match on the label itself, not *Label:*.
+  const branch = matchOne(text, /Branch:\s*(.+)/);
+  const rawShift = matchOne(text, /Shift:\s*(.+)/);
   // Newer app versions append an explicit phase, e.g. "Morning (Opening)" or
   // "Mid-Shift (Closing)". Split that out so shift stays just "Morning"/"Mid-Shift"
   // and phase captures "Opening"/"Closing" when the app provides it (older
@@ -37,9 +46,9 @@ function parseCashCount(text) {
     shift = phaseMatch[1].trim();
     phase = phaseMatch[2];
   }
-  const teller = matchOne(text, /\*Teller:\*\s*(.+)/);
-  const timestamp = matchOne(text, /\*Timestamp:\*\s*(.+)/);
-  const refCode = matchOne(text, /\*Ref Code:\*\s*(.+)/);
+  const teller = matchOne(text, /Teller:\s*(.+)/);
+  const timestamp = matchOne(text, /Timestamp:\s*(.+)/);
+  const refCode = matchOne(text, /Ref Code:\s*(.+)/);
 
   // Split into FOREX section and OTHERS section
   const forexSection = text.split('*OTHERS*')[0];
@@ -48,12 +57,47 @@ function parseCashCount(text) {
   const forex = extractCurrencyBlocks(forexSection);
   const others = extractNamedBlocks(othersSection);
 
+  // Newer flat-line app format doesn't use an "*OTHERS*" section header at
+  // all — Hive/Opex/JuanPay/Scratch/Receivables lines just appear inline in
+  // the main body as ":emoji: Name: ₱amount". Pick up anything not already
+  // captured as a currency code, so this doesn't clobber the older block
+  // format (which already found real values via extractNamedBlocks above).
+  const flatOthers = extractFlatNamedAmounts(text);
+  for (const [name, amount] of Object.entries(flatOthers)) {
+    if (!(name in others.totals)) others.totals[name] = amount;
+  }
+
   return {
     branch, shift, phase, teller, timestamp, refCode,
     totals: forex.totals,
     others: others.totals,
     denominations: { ...forex.denominations, ...others.denominations }
   };
+}
+
+// Known non-currency labels the app posts as flat ":emoji: Label: ₱amount"
+// lines. Kept as an explicit list (rather than "anything not a 3-letter
+// currency code") so this can't accidentally swallow a real currency line
+// or the Grand Total/Ref Code/Timestamp lines.
+const FLAT_OTHER_LABELS = ['Hive', 'Opex', 'JuanPay', 'Scratch', 'Receivables (PHP)', 'Receivables (USD)'];
+
+function extractFlatNamedAmounts(text) {
+  const totals = {};
+  for (const label of FLAT_OTHER_LABELS) {
+    const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(`${escaped}:\\s*(?:₱|\\$|€|£|¥|HK\\$|S\\$|A\\$|C\\$|SR|฿|₩)?\\s*([\\d,]+\\.?\\d*)`, 'i');
+    const m = text.match(re);
+    if (m) {
+      const amount = parseFloat(m[1].replace(/,/g, ''));
+      if (!isNaN(amount)) {
+        // Normalize "Receivables (PHP)" / "Receivables (USD)" down to one
+        // "Receivables" key isn't done here — kept distinct since they're
+        // different currencies; store under the exact label seen.
+        totals[label] = amount;
+      }
+    }
+  }
+  return totals;
 }
 
 // Parses individual denomination lines within a block, e.g. "₱1,000 × 175 = ₱175,000"
@@ -91,6 +135,21 @@ function extractCurrencyBlocks(section) {
     }
     denominations[headers[i].ccy] = parseDenominationLines(block);
   }
+
+  // Newer app format: flat currency lines like ":flag-ph: PHP: ₱341,699.64"
+  // (no per-currency denomination breakdown, no "Subtotal" — the whole line
+  // IS the total). Only used as a fallback when the header-block format above
+  // found nothing, so older/richer messages keep using their full parse path.
+  if (headers.length === 0) {
+    const flatLineRegex = /:[\w-]+:\s*([A-Z]{3}):\s*(?:₱|\$|€|£|¥|HK\$|S\$|A\$|C\$|SR|฿|₩)?\s*([\d,]+\.?\d*)/g;
+    let flatMatch;
+    while ((flatMatch = flatLineRegex.exec(section)) !== null) {
+      const ccy = flatMatch[1];
+      const amount = parseFloat(flatMatch[2].replace(/,/g, ''));
+      if (!isNaN(amount)) totals[ccy] = amount;
+    }
+  }
+
   return { totals, denominations };
 }
 
