@@ -40,6 +40,24 @@ const CCY_EMOJI = {
   Hive: '🐝', Opex: '🧾'
 };
 
+// Rate-limits the "couldn't find a matching count" failure messages so a burst
+// of duplicate/retried Slack webhook deliveries (e.g. from Render cold-start
+// restarts re-triggering the same event) doesn't flood the channel with the
+// same error over and over. Real successful reports are NEVER rate-limited —
+// only the "can't check this one" / "no prior count" failure notices are.
+// In-memory only; resets on redeploy, same caveat as OPEN_FLAGS below.
+const LAST_FAILURE_NOTICE = new Map(); // key: `${branch}|${kind}` -> timestamp (ms)
+const FAILURE_NOTICE_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
+
+function shouldPostFailureNotice(branch, kind) {
+  const key = `${branch}|${kind}`;
+  const last = LAST_FAILURE_NOTICE.get(key);
+  const now = Date.now();
+  if (last && now - last < FAILURE_NOTICE_COOLDOWN_MS) return false;
+  LAST_FAILURE_NOTICE.set(key, now);
+  return true;
+}
+
 /* ------------------------------------------------------------------ */
 /* REPORT 1 — closing: transactions vs closing count                   */
 /* ------------------------------------------------------------------ */
@@ -61,7 +79,11 @@ async function runShiftAudit(closingEvent, closingCount, branchConfig, { dryRun 
       const msg = `⚠️ *Shift Audit — ${branchConfig.name}*\n` +
         `No opening count found for this shift (${windowLabel(closingCount)}) — can't check this one.`;
       if (dryRun) return msg;
-      await postMessage(cashCountChannelId, msg);
+      if (shouldPostFailureNotice(branchConfig.name, 'shift-no-opening')) {
+        await postMessage(cashCountChannelId, msg);
+      } else {
+        console.log(`[rate-limited] Suppressed duplicate "no opening count" notice for ${branchConfig.name}`);
+      }
       return;
     }
 
@@ -91,7 +113,11 @@ async function runShiftAudit(closingEvent, closingCount, branchConfig, { dryRun 
     console.error('runShiftAudit error:', err);
     const msg = `⚠️ Audit bot error for ${branchConfig.name}: ${err.message}\n\n${err.stack || ''}`;
     if (dryRun) return msg;
-    await postMessage(branchConfig.cashCountChannelId, msg).catch(() => {});
+    if (shouldPostFailureNotice(branchConfig.name, 'shift-error')) {
+      await postMessage(branchConfig.cashCountChannelId, msg).catch(() => {});
+    } else {
+      console.log(`[rate-limited] Suppressed duplicate shift-audit error notice for ${branchConfig.name}`);
+    }
   }
 }
 
@@ -110,7 +136,11 @@ async function runCloseVsOpenCheck(openingEvent, openingCount, branchConfig, { d
     if (!closingCount) {
       const msg = `⚠️ *Handover Check — ${branchConfig.name}*\nNo prior closing count found to compare against.`;
       if (dryRun) return msg;
-      await postMessage(cashCountChannelId, msg);
+      if (shouldPostFailureNotice(branchConfig.name, 'handover-no-closing')) {
+        await postMessage(cashCountChannelId, msg);
+      } else {
+        console.log(`[rate-limited] Suppressed duplicate "no closing count" notice for ${branchConfig.name}`);
+      }
       return;
     }
 
@@ -166,7 +196,11 @@ async function runCloseVsOpenCheck(openingEvent, openingCount, branchConfig, { d
     console.error('runCloseVsOpenCheck error:', err);
     const msg = `⚠️ Audit bot error (handover) for ${branchConfig.name}: ${err.message}\n\n${err.stack || ''}`;
     if (dryRun) return msg;
-    await postMessage(branchConfig.cashCountChannelId, msg).catch(() => {});
+    if (shouldPostFailureNotice(branchConfig.name, 'handover-error')) {
+      await postMessage(branchConfig.cashCountChannelId, msg).catch(() => {});
+    } else {
+      console.log(`[rate-limited] Suppressed duplicate handover-check error notice for ${branchConfig.name}`);
+    }
   }
 }
 
