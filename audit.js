@@ -40,6 +40,18 @@ const CCY_EMOJI = {
   Hive: '🐝', Opex: '🧾'
 };
 
+// Buckets with no transaction feed the bot can check — always excluded from
+// both reports so every shift doesn't get flagged for something we can
+// never actually verify. (Revisit separately once/if these get their own
+// tracked channel.)
+const UNTRACKED_BUCKETS = ['Hive', 'Opex', 'Scratch', 'Receivables (PHP)', 'Receivables (USD)'];
+
+/** "Cristina Mirang" -> "Cristina". Falls back to the full string if there's no space. */
+function firstName(fullName) {
+  if (!fullName) return '?';
+  return fullName.trim().split(/\s+/)[0];
+}
+
 // Rate-limits the "couldn't find a matching count" failure messages so a burst
 // of duplicate/retried Slack webhook deliveries (e.g. from Render cold-start
 // restarts re-triggering the same event) doesn't flood the channel with the
@@ -98,8 +110,8 @@ async function runShiftAudit(closingEvent, closingCount, branchConfig, { dryRun 
       .map(m => ({ parsed: parseTransaction(m.text), raw: m.text, ts: m.ts }))
       .filter(t => t.parsed);
 
-    const openingTotals = { ...openingCount.totals, ...openingCount.others };
-    const closingTotals = { ...closingCount.totals, ...closingCount.others };
+    const openingTotals = stripUntracked({ ...openingCount.totals, ...openingCount.others });
+    const closingTotals = stripUntracked({ ...closingCount.totals, ...closingCount.others });
     const results = reconcile(openingTotals, closingTotals, tickets.map(t => t.parsed), {});
 
     const report = buildShiftAuditReport({
@@ -154,8 +166,8 @@ async function runCloseVsOpenCheck(openingEvent, openingCount, branchConfig, { d
       .map(m => parseTransaction(m.text))
       .filter(Boolean);
 
-    const closingTotals = { ...closingCount.totals, ...closingCount.others };
-    const openingTotals = { ...openingCount.totals, ...openingCount.others };
+    const closingTotals = stripUntracked({ ...closingCount.totals, ...closingCount.others });
+    const openingTotals = stripUntracked({ ...openingCount.totals, ...openingCount.others });
     const allCcy = new Set([...Object.keys(closingTotals), ...Object.keys(openingTotals)]);
 
     const asResults = [];
@@ -217,6 +229,13 @@ async function runCloseVsOpenCheck(openingEvent, openingCount, branchConfig, { d
  * the count we're looking for past a single page and we'd wrongly report
  * "no opening count found" even though one genuinely exists.
  */
+/** Removes UNTRACKED_BUCKETS keys before reconciliation, so they never show up as a mismatch. */
+function stripUntracked(totals) {
+  const copy = { ...totals };
+  for (const key of UNTRACKED_BUCKETS) delete copy[key];
+  return copy;
+}
+
 async function findPriorCount(channelId, beforeTs, referenceCount, predicate) {
   const PAGE_SIZE = 200;
   const MAX_PAGES = 10; // hard ceiling — 2,000 messages back is well past any
@@ -243,15 +262,20 @@ async function findPriorCount(channelId, beforeTs, referenceCount, predicate) {
   return null;
 }
 
-/** Net company-side movement in one currency across a set of tickets. */
+/**
+ * Net company-side movement in one currency across a set of tickets.
+ * BUY = counterparty hands Psulit that FX, Psulit hands back PHP -> Psulit's
+ *       FX stock goes UP.
+ * SELL = Psulit hands the counterparty that FX -> Psulit's FX stock goes DOWN.
+ * Identical rule for retail and wholesale tickets (confirmed against real
+ * transactions) — matches reconcile.js exactly, no separate flip needed.
+ */
 function movementFor(tickets, ccy) {
   let sum = 0;
   for (const tx of tickets) {
     for (const mv of (tx.movements || [])) {
       if (mv.ccy !== ccy) continue;
-      const sign = tx.isWholesale
-        ? (mv.action === 'SELL' ? -1 : 1)
-        : (mv.action === 'BUY'  ? -1 : 1);
+      const sign = mv.action === 'BUY' ? 1 : -1;
       sum += sign * mv.fcyAmount;
     }
   }
@@ -286,50 +310,35 @@ function clientLabel(raw) {
   return m ? m[1].trim() : null;
 }
 
-/** Builds one plain-language question + a short evidence list for a mismatched currency. */
+/**
+ * Builds one short, plain block for a mismatched currency: the amount and
+ * direction, plus (if any transactions touched it) the single biggest one as
+ * a lead — not a list, just one clue to start with.
+ */
 function buildQuestionBlock(ccy, diff, tickets) {
   const emoji = CCY_EMOJI[ccy] || '•';
   const short = diff < 0;
   const label = moneyLabel(ccy, Math.abs(diff));
-  const phrase = short ? `is short by ${label}` : `has ${label} extra than expected`;
+  const verb = short ? 'is missing' : 'has extra';
 
   const lines = [];
-  lines.push(`${emoji} *${ccy}* ${phrase}.`);
+  lines.push(`${emoji} ${ccy} ${verb} ${label}`);
 
   const relevant = ticketsForCurrency(tickets, ccy);
-  if (relevant.length === 0) {
-    lines.push(`   We didn't see any ${ccy} transaction this shift. Was something missed, or moved outside a normal transaction?`);
-  } else {
-    // Prefer the largest tickets — most likely to explain a big gap.
+  if (relevant.length > 0) {
     const sorted = [...relevant].sort((a, b) => {
       const amtA = ccy === 'PHP' ? (a.parsed.phpAmount || 0) : Math.max(...a.parsed.movements.filter(m => m.ccy === ccy).map(m => m.fcyAmount));
       const amtB = ccy === 'PHP' ? (b.parsed.phpAmount || 0) : Math.max(...b.parsed.movements.filter(m => m.ccy === ccy).map(m => m.fcyAmount));
       return amtB - amtA;
     });
-    const shown = sorted.slice(0, 3);
-    for (const t of shown) {
-      const who = t.parsed.isWholesale ? 'wholesale' : (clientLabel(t.raw) || 'client');
-      // Ticket convention (confirmed, identical for retail and wholesale —
-      // no perspective flip needed either way, matching reconcile.js exactly):
-      //   BUY  = the counterparty hands Psulit that FX, Psulit hands back PHP
-      //          -> Psulit's FX stock UP, Psulit's PHP DOWN.
-      //   SELL = Psulit hands the counterparty that FX, they hand back PHP
-      //          -> Psulit's FX stock DOWN, Psulit's PHP UP.
-      if (ccy === 'PHP') {
-        // PHP has no per-ticket movements entry — describe it via the PHP
-        // amount and the ticket's primary action (same convention as reconcile.js).
-        const primary = t.parsed.movements[0];
-        const verb = primary && primary.action === 'BUY' ? 'Paid out' : 'Received';
-        lines.push(`   – ${verb} ${moneyLabel('PHP', t.parsed.phpAmount)} (${who}) at ${timeLabel(t.ts)}`);
-      } else {
-        const mv = t.parsed.movements.find(m => m.ccy === ccy);
-        lines.push(`   – ${mv.action === 'BUY' ? 'Received' : 'Gave out'} ${fmt(mv.fcyAmount)} ${ccy} (${who}) at ${timeLabel(t.ts)}`);
-      }
+    const biggest = sorted[0];
+    const who = biggest.parsed.isWholesale ? 'wholesale' : firstName(clientLabel(biggest.raw));
+    if (ccy === 'PHP') {
+      lines.push(`Biggest transaction: ${who}, ${moneyLabel('PHP', biggest.parsed.phpAmount)} at ${timeLabel(biggest.ts)}.`);
+    } else {
+      const mv = biggest.parsed.movements.find(m => m.ccy === ccy);
+      lines.push(`Biggest transaction: ${who}, ${fmt(mv.fcyAmount)} ${ccy} at ${timeLabel(biggest.ts)}.`);
     }
-    if (sorted.length > shown.length) {
-      lines.push(`   – +${sorted.length - shown.length} more ${ccy} transaction(s) this shift`);
-    }
-    lines.push(`   Can you check if these were entered correctly?`);
   }
 
   return lines.join('\n');
@@ -371,44 +380,32 @@ function buildShiftAuditReport({ branchConfig, closingCount, openingCount, resul
   const dateLabel = (closingCount.timestamp || '').split(',')[0].trim();
   const { stillOpen, resolved } = annotateFlags(branchConfig.name, results, dateLabel, dryRun);
 
+  const openName = firstName(openingCount.teller);
+  const closeName = firstName(closingCount.teller);
+
   const lines = [];
   if (dryRun) lines.push('_[DRY RUN — not posted to Slack]_');
-  lines.push(`🔍 *SHIFT AUDIT — ${branchConfig.name}*`);
-  lines.push(`📅 ${dateLabel} | ${windowLabel(closingCount)}`);
-  lines.push(`${openingCount.teller || '?'} (opening) ${closingCount.teller || '?'} (closing)`);
+  lines.push(`🔍 ${branchConfig.name} — ${dateLabel}, ${windowLabel(closingCount)}`);
+  lines.push(`${openName} (opened) → ${closeName} (closed)`);
   lines.push('');
 
-  const clientCount = tickets.filter(t => !t.parsed.isWholesale).length;
-  const wholesaleCount = tickets.filter(t => t.parsed.isWholesale).length;
-
   if (stillOpen.length === 0 && resolved.length === 0) {
-    lines.push(`${tickets.length} transactions checked — everything matches. ✅ Nothing to ask about.`);
+    lines.push(`✅ All good. ${tickets.length} transactions checked, everything matches.`);
     return lines.join('\n');
   }
 
-  if (stillOpen.length > 0) {
-    const s = stillOpen.length > 1;
-    lines.push(`${tickets.length} transactions checked (${clientCount} client, ${wholesaleCount} wholesale) — ${stillOpen.length} thing${s ? 's' : ''} ${s ? "don't" : "doesn't"} match. Can you two help answer ${s ? 'these' : 'this'}?`);
-    lines.push('');
-    for (const r of stillOpen) {
-      lines.push(buildQuestionBlock(r.ccy, r.diff, tickets));
-      if (r.since === '(would be newly flagged)') {
-        lines.push(`   _(Would be newly flagged as of this report.)_`);
-      } else if (r.since) {
-        lines.push(`   _(Still unresolved since ${r.since} — please check.)_`);
-      }
-      lines.push('');
-    }
-  }
-
-  if (resolved.length > 0) {
-    for (const r of resolved) {
-      lines.push(`✅ *${r.ccy}* is now correct — resolved${r.since ? ` (was off since ${r.since})` : ''}.`);
-    }
+  for (const r of stillOpen) {
+    lines.push(buildQuestionBlock(r.ccy, r.diff, tickets));
     lines.push('');
   }
 
-  lines.push('Reply here so we can close this out. 🙏');
+  for (const r of resolved) {
+    lines.push(`✅ ${r.ccy} is fixed now.`);
+  }
+  if (resolved.length) lines.push('');
+
+  const who = [openName, closeName].filter((v, i, a) => a.indexOf(v) === i);
+  lines.push(`${who.map(n => '@' + n).join(' ')} — do you know what happened? Reply here 🙏`);
   return lines.join('\n');
 }
 
@@ -417,46 +414,36 @@ function buildQuestionReport({ branchConfig, title, dateLabel, windowText, openi
 
   const { stillOpen, resolved } = annotateFlags(branchConfig.name, results, dateLabel, dryRun);
 
+  const openName = firstName(openingTeller);
+  const closeName = firstName(closingTeller);
+
   const lines = [];
   if (dryRun) lines.push('_[DRY RUN — not posted to Slack]_');
-  lines.push(`🔄 *${title} — ${branchConfig.name}*`);
-  lines.push(`📅 ${dateLabel} | ${windowText}`);
-  lines.push(`${openingTeller || '?'} → ${closingTeller || '?'}`);
-  if (txCount) lines.push(`${txCount} ${txLabel}`);
+  lines.push(`🔄 ${branchConfig.name} — ${dateLabel}, ${windowText}`);
+  lines.push(`${openName} → ${closeName}`);
   lines.push('');
 
   if (stillOpen.length === 0 && resolved.length === 0) {
-    lines.push('Everything matches. ✅ Nothing to ask about.');
+    lines.push('✅ All good. Nothing missing before trading starts.');
     return lines.join('\n');
   }
 
-  if (stillOpen.length > 0) {
-    const s = stillOpen.length > 1;
-    lines.push(`${stillOpen.length} thing${s ? 's' : ''} ${s ? "don't" : "doesn't"} match — please check before trading:`);
-    lines.push('');
-    for (const r of stillOpen) {
-      const emoji = CCY_EMOJI[r.ccy] || '•';
-      const short = r.diff < 0;
-      const label = moneyLabel(r.ccy, Math.abs(r.diff));
-      const phrase = short ? `is short by ${label}` : `has ${label} extra than expected`;
-      lines.push(`${emoji} *${r.ccy}* ${phrase}. Can you check what happened between the two counts?`);
-      if (r.since === '(would be newly flagged)') {
-        lines.push(`   _(Would be newly flagged as of this report.)_`);
-      } else if (r.since) {
-        lines.push(`   _(Still unresolved since ${r.since}.)_`);
-      }
-      lines.push('');
-    }
+  for (const r of stillOpen) {
+    const emoji = CCY_EMOJI[r.ccy] || '•';
+    const short = r.diff < 0;
+    const label = moneyLabel(r.ccy, Math.abs(r.diff));
+    const verb = short ? 'is missing' : 'has extra';
+    lines.push(`${emoji} ${r.ccy} ${verb} ${label}`);
   }
+  lines.push('');
 
-  if (resolved.length > 0) {
-    for (const r of resolved) {
-      lines.push(`✅ *${r.ccy}* is now correct — resolved${r.since ? ` (was off since ${r.since})` : ''}.`);
-    }
-    lines.push('');
+  for (const r of resolved) {
+    lines.push(`✅ ${r.ccy} is fixed now.`);
   }
+  if (resolved.length) lines.push('');
 
-  lines.push('Reply here so we can close this out. 🙏');
+  const who = [openName, closeName].filter((v, i, a) => a.indexOf(v) === i);
+  lines.push(`${who.map(n => '@' + n).join(' ')} — please check before trading. Reply here 🙏`);
   return lines.join('\n');
 }
 
