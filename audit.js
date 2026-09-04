@@ -158,6 +158,13 @@ async function runShiftAudit(closingEvent, closingCount, branchConfig, { dryRun 
     for (const r of results) {
       r.missingFromOpening = !(r.ccy in openingTotals);
       r.missingFromClosing = !(r.ccy in closingTotals);
+      // Attach the raw opening balance here (not just reconcile()'s computed
+      // `expected`) so a later thread-reply computation can still show
+      // "started the shift with X" even if it's rebuilt from the flag store
+      // alone, long after this run finished.
+      r.openingAmount = (openingCount.totals && openingCount.totals[r.ccy] != null)
+        ? openingCount.totals[r.ccy]
+        : (openingCount.others && openingCount.others[r.ccy] != null ? openingCount.others[r.ccy] : 0);
     }
 
     const report = buildShiftAuditReport({
@@ -234,6 +241,12 @@ async function runCloseVsOpenCheck(openingEvent, openingCount, branchConfig, { d
       });
     }
 
+    for (const r of asResults) {
+      r.missingFromOpening = !(r.ccy in closingTotals); // "opening" side of THIS check is the prior closing count
+      r.missingFromClosing = !(r.ccy in openingTotals); // "closing" side of THIS check is the new opening count
+      r.openingAmount = closingTotals[r.ccy] != null ? closingTotals[r.ccy] : 0;
+    }
+
     const report = buildQuestionReport({
       branchConfig,
       title: 'HANDOVER CHECK',
@@ -244,6 +257,7 @@ async function runCloseVsOpenCheck(openingEvent, openingCount, branchConfig, { d
       txCount: gapTickets.length,
       txLabel: 'transaction(s) posted in the gap',
       results: asResults,
+      gapTickets,
       dryRun
     });
 
@@ -501,7 +515,11 @@ function annotateFlags(flagStore, branch, results, dateLabel, dryRun = false) {
     if (prior) {
       stillOpen.push({ ...r, since: prior.firstFlaggedLabel });
     } else {
-      if (!dryRun) flagStore.set(key, { diff: r.diff, firstFlaggedLabel: dateLabel });
+      if (!dryRun) flagStore.set(key, {
+        diff: r.diff, firstFlaggedLabel: dateLabel,
+        missingFromOpening: r.missingFromOpening, missingFromClosing: r.missingFromClosing,
+        expected: r.expected, actual: r.actual, openingAmount: r.openingAmount
+      });
       stillOpen.push({ ...r, since: dryRun ? '(would be newly flagged)' : null });
     }
   }
@@ -517,16 +535,38 @@ function annotateFlags(flagStore, branch, results, dateLabel, dryRun = false) {
  * of its own flags).
  */
 function getOpenShiftAuditFlags(branch) {
+  return getOpenFlagsFrom(SHIFT_AUDIT_FLAGS, branch);
+}
+
+/** Same shape as getOpenShiftAuditFlags, but for the Handover Check's own tracker. */
+function getOpenHandoverFlags(branch) {
+  return getOpenFlagsFrom(HANDOVER_FLAGS, branch);
+}
+
+function getOpenFlagsFrom(flagStore, branch) {
   const open = [];
-  for (const [key, value] of SHIFT_AUDIT_FLAGS.entries()) {
+  for (const [key, value] of flagStore.entries()) {
     const [flagBranch, ccy] = key.split('|');
     if (flagBranch === branch) {
-      open.push({ ccy, diff: value.diff, since: value.firstFlaggedLabel });
+      open.push({
+        ccy, diff: value.diff, since: value.firstFlaggedLabel,
+        missingFromOpening: value.missingFromOpening,
+        missingFromClosing: value.missingFromClosing,
+        expected: value.expected, actual: value.actual, openingAmount: value.openingAmount
+      });
     }
   }
   return open;
 }
 
+/**
+ * Builds the SHORT summary posted right after a shift closes — one line per
+ * discrepancy plus a single tag asking the tellers to reply. Deliberately
+ * does NOT include the full math breakdown; that only gets posted (via
+ * buildComputationReply, below) once someone actually replies in the
+ * thread, so a clean shift stays a two-line message instead of a wall of
+ * text nobody asked to see yet.
+ */
 function buildShiftAuditReport({ branchConfig, closingCount, openingCount, results, tickets, expenseEntries = [], dryRun = false }) {
   const dateLabel = (closingCount.timestamp || '').split(',')[0].trim();
   const { stillOpen, resolved } = annotateFlags(SHIFT_AUDIT_FLAGS, branchConfig.name, results, dateLabel, dryRun);
@@ -540,14 +580,10 @@ function buildShiftAuditReport({ branchConfig, closingCount, openingCount, resul
   lines.push(`${openName} (opened) → ${closeName} (closed)`);
   lines.push('');
 
-  // Surface any replenishments/expenses that were already folded into the
-  // math, so a clean result doesn't look suspiciously "too clean" and a
-  // flagged result doesn't get a redundant question about something that's
-  // already accounted for.
   if (expenseEntries.length > 0) {
     const netLabel = expenseEntries.reduce((s, e) => s + e.amount, 0);
     const sign = netLabel >= 0 ? '+' : '';
-    lines.push(`💼 ${expenseEntries.length} expense/replenishment entr${expenseEntries.length > 1 ? 'ies' : 'y'} this shift (net ${sign}${moneyLabel('PHP', netLabel)}) already included below.`);
+    lines.push(`💼 ${expenseEntries.length} expense/replenishment entr${expenseEntries.length > 1 ? 'ies' : 'y'} this shift (net ${sign}${moneyLabel('PHP', netLabel)}) already included.`);
     lines.push('');
   }
 
@@ -556,32 +592,19 @@ function buildShiftAuditReport({ branchConfig, closingCount, openingCount, resul
     return lines.join('\n');
   }
 
-  // SUMMARY FIRST: one line per discrepancy, so the whole picture is
-  // scannable before diving into any single one's full math breakdown. A
-  // report with several mismatched currencies used to read as one long wall
-  // of repeated "Here's the math" sections — this puts the headline numbers
-  // up top and pushes the detail (and the specific questions) below it.
   if (stillOpen.length > 0) {
     lines.push(`*${stillOpen.length} discrepanc${stillOpen.length > 1 ? 'ies' : 'y'} this shift:*`);
     for (const r of stillOpen) {
-      const emoji = CCY_EMOJI[r.ccy] || '•';
+      const emoji = CCY_EMOJI[r.ccy] || '❗';
       if (r.missingFromOpening && !r.missingFromClosing) {
-        lines.push(`${emoji} ${r.ccy}: not in the opening count, ${moneyLabel(r.ccy, r.actual)} at closing`);
+        lines.push(`❗ ${r.ccy}: not in the opening count, ${moneyLabel(r.ccy, r.actual)} at closing`);
       } else if (r.missingFromClosing && !r.missingFromOpening) {
-        lines.push(`${emoji} ${r.ccy}: ${moneyLabel(r.ccy, r.expected)} at opening, not in the closing count`);
+        lines.push(`❗ ${r.ccy}: ${moneyLabel(r.ccy, r.expected)} at opening, not in the closing count`);
       } else {
         const short = r.diff < 0;
-        lines.push(`${emoji} ${r.ccy}: ${short ? 'short' : 'extra'} ${moneyLabel(r.ccy, Math.abs(r.diff))}`);
+        lines.push(`❗ ${r.ccy}: ${short ? 'short' : 'extra'} ${moneyLabel(r.ccy, Math.abs(r.diff))}`);
       }
     }
-    lines.push('');
-  }
-
-  for (const r of stillOpen) {
-    const openingAmount = (openingCount.totals && openingCount.totals[r.ccy] != null)
-      ? openingCount.totals[r.ccy]
-      : (openingCount.others && openingCount.others[r.ccy] != null ? openingCount.others[r.ccy] : 0);
-    lines.push(buildQuestionBlock(r.ccy, r.diff, tickets, openingAmount, r.expected, r.actual, r.since, r.missingFromOpening, r.missingFromClosing));
     lines.push('');
   }
 
@@ -591,7 +614,55 @@ function buildShiftAuditReport({ branchConfig, closingCount, openingCount, resul
   if (resolved.length) lines.push('');
 
   const who = [openName, closeName].filter((v, i, a) => a.indexOf(v) === i);
-  lines.push(`${who.map(n => '@' + n).join(' ')} — do you know what happened? Reply here 🙏`);
+  lines.push(`${who.map(n => '@' + n).join(' ')} — can you explain these? Reply here and I'll walk through the numbers with you 🙏`);
+  return lines.join('\n');
+}
+
+/**
+ * Builds the FULL math breakdown for every currently-open discrepancy on a
+ * branch — posted as a threaded reply once someone actually responds to the
+ * short summary above, rather than automatically. Re-derives everything
+ * from SHIFT_AUDIT_FLAGS plus a fresh ticket list, so this works correctly
+ * even if it's triggered long after the original runShiftAudit() call (e.g.
+ * after a Render restart, or the next day) — nothing here depends on
+ * in-memory state from that original run except the flags themselves.
+ */
+function buildComputationReply(branchConfig, tickets) {
+  const openFlags = getOpenShiftAuditFlags(branchConfig.name);
+  if (openFlags.length === 0) {
+    return 'Looks like everything already reconciled — nothing open to walk through right now.';
+  }
+
+  const lines = [];
+  lines.push(`Here's the full math for ${branchConfig.name}:`);
+  lines.push('');
+  for (const f of openFlags) {
+    lines.push(buildQuestionBlock(f.ccy, f.diff, tickets, f.openingAmount, f.expected, f.actual, f.since, f.missingFromOpening, f.missingFromClosing));
+    lines.push('');
+  }
+  lines.push(`Reply here once you've figured it out. 🙏`);
+  return lines.join('\n');
+}
+
+/**
+ * Same idea as buildComputationReply, but for the Handover Check's own
+ * flags (overnight close-vs-open mismatches), triggered the same way — a
+ * thread reply on the short Handover Check summary.
+ */
+function buildHandoverComputationReply(branchConfig, gapTickets) {
+  const openFlags = getOpenHandoverFlags(branchConfig.name);
+  if (openFlags.length === 0) {
+    return 'Looks like everything already reconciled — nothing open to walk through right now.';
+  }
+
+  const lines = [];
+  lines.push(`Here's the full math for ${branchConfig.name}'s handover:`);
+  lines.push('');
+  for (const f of openFlags) {
+    lines.push(buildQuestionBlock(f.ccy, f.diff, gapTickets || [], f.openingAmount, f.expected, f.actual, f.since, f.missingFromOpening, f.missingFromClosing));
+    lines.push('');
+  }
+  lines.push(`Reply here once you've figured it out. 🙏`);
   return lines.join('\n');
 }
 
@@ -619,14 +690,13 @@ function buildQuestionReport({ branchConfig, title, dateLabel, windowText, openi
   if (!hasOvernightIssue) {
     lines.push('✅ Overnight is fine — nothing moved that shouldn\'t have.');
   } else {
-    lines.push('⚠️ *1 new thing doesn\'t match — please check before trading:*'
+    lines.push('⚠️ *1 new thing doesn\'t match:*'
       .replace('1 new thing', stillOpen.length > 1 ? `${stillOpen.length} new things` : '1 new thing'));
     for (const r of stillOpen) {
-      const emoji = CCY_EMOJI[r.ccy] || '•';
+      const emoji = CCY_EMOJI[r.ccy] || '❗';
       const short = r.diff < 0;
       const label = moneyLabel(r.ccy, Math.abs(r.diff));
-      const verb = short ? 'is short by' : 'has extra';
-      lines.push(`${emoji} *${r.ccy}* ${verb} ${label}${short ? '' : ' than expected'}. Can you check what happened between the two counts?`);
+      lines.push(`❗ ${r.ccy}: ${short ? 'short' : 'extra'} ${label}`);
     }
   }
 
@@ -646,11 +716,22 @@ function buildQuestionReport({ branchConfig, title, dateLabel, windowText, openi
     lines.push('');
     for (const f of openShiftAuditFlags) {
       const emoji = CCY_EMOJI[f.ccy] || '•';
-      const short = f.diff < 0;
-      const label = moneyLabel(f.ccy, Math.abs(f.diff));
-      const verb = short ? 'was short' : 'had extra';
       const sinceLabel = f.since ? ` (from the ${f.since} shift)` : '';
-      lines.push(`${emoji} The drawer ${verb} ${label} that was never explained${sinceLabel}.`);
+      // Same distinction as the Shift Audit itself: a currency that was
+      // simply never mentioned in one of the two counts gets the gentler
+      // "reporting gap" framing, not "the drawer was short/had extra" —
+      // restating it as a cash discrepancy here would contradict the
+      // original, correctly-worded question this is just echoing.
+      if (f.missingFromOpening && !f.missingFromClosing) {
+        lines.push(`${emoji} ${f.ccy} was never confirmed at opening that day, but showed ${moneyLabel(f.ccy, f.diff >= 0 ? Math.abs(f.diff) : f.diff)} at closing${sinceLabel} — still waiting to hear if that was a reporting gap or a real change.`);
+      } else if (f.missingFromClosing && !f.missingFromOpening) {
+        lines.push(`${emoji} ${f.ccy} was never confirmed at closing that day${sinceLabel} — still waiting to hear if that was a reporting gap or a real change.`);
+      } else {
+        const short = f.diff < 0;
+        const label = moneyLabel(f.ccy, Math.abs(f.diff));
+        const verb = short ? 'was short' : 'had extra';
+        lines.push(`${emoji} The drawer ${verb} ${label} that was never explained${sinceLabel}.`);
+      }
     }
   }
 
@@ -686,5 +767,9 @@ module.exports = {
   runShiftAudit,
   runCloseVsOpenCheck,
   isScheduledOpening,
-  isScheduledClosing
+  isScheduledClosing,
+  buildComputationReply,
+  buildHandoverComputationReply,
+  getOpenShiftAuditFlags,
+  getOpenHandoverFlags
 };
