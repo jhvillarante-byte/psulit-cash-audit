@@ -148,6 +148,18 @@ async function runShiftAudit(closingEvent, closingCount, branchConfig, { dryRun 
     const adjustments = expenseTotal !== 0 ? { PHP: expenseTotal } : {};
     const results = reconcile(openingTotals, closingTotals, tickets.map(t => t.parsed), adjustments);
 
+    // A currency that's completely ABSENT from one count's report (e.g. a
+    // teller simply forgot to type a "JuanPay:" line) is a different
+    // situation from one that was counted and genuinely changed — the first
+    // is very likely a data-entry gap, not a real cash movement, and should
+    // be asked about differently. reconcile() can't tell these apart (both
+    // collapse to 0 via `|| 0`), so record which currencies were actually
+    // present in each raw count before it runs.
+    for (const r of results) {
+      r.missingFromOpening = !(r.ccy in openingTotals);
+      r.missingFromClosing = !(r.ccy in closingTotals);
+    }
+
     const report = buildShiftAuditReport({
       branchConfig, closingCount, openingCount, results, tickets, expenseEntries, dryRun
     });
@@ -358,11 +370,44 @@ function clientLabel(raw) {
  * of the shift, used to show the arithmetic in plain terms rather than
  * just stating the final gap.
  */
-function buildQuestionBlock(ccy, diff, tickets, openingAmount, expectedAmount, actualAmount, since) {
+function buildQuestionBlock(ccy, diff, tickets, openingAmount, expectedAmount, actualAmount, since, missingFromOpening, missingFromClosing) {
   const emoji = CCY_EMOJI[ccy] || '•';
   const short = diff < 0;
   const gapLabel = moneyLabel(ccy, Math.abs(diff));
   const verb = short ? 'is short' : 'has extra';
+
+  // A currency that's simply ABSENT from one of the two raw counts (not
+  // counted at all, vs. counted as a real number) is very likely a data
+  // entry gap — someone forgot to include that line — not a real cash
+  // movement. Ask about it as a reporting question, not an accusation that
+  // money appeared or vanished, and skip the full transaction math (there's
+  // nothing to reconcile against if the starting or ending point was never
+  // actually recorded).
+  if (missingFromOpening && !missingFromClosing) {
+    const lines = [];
+    lines.push(`${emoji} *${ccy} wasn't included in the opening count*, but the closing count shows ${moneyLabel(ccy, actualAmount)}.`);
+    lines.push(`This might just be a reporting gap rather than a real cash issue — can you confirm ${ccy} was actually ${moneyLabel(ccy, actualAmount)} at the start of the shift too?`);
+    if (since) lines.push('');
+    if (since === '(would be newly flagged)') {
+      lines.push(`_(This would be a new question as of this report.)_`);
+    } else if (since) {
+      lines.push(`_(Still unresolved since ${since} — this will keep showing up until it's sorted out.)_`);
+    }
+    return lines.join('\n');
+  }
+  if (missingFromClosing && !missingFromOpening) {
+    const lines = [];
+    lines.push(`${emoji} *${ccy} was in the opening count* (${moneyLabel(ccy, openingAmount)}), *but wasn't included in the closing count.*`);
+    lines.push(`This might just be a reporting gap rather than money going missing — can you confirm what ${ccy} actually was at closing?`);
+    if (since === '(would be newly flagged)') {
+      lines.push('');
+      lines.push(`_(This would be a new question as of this report.)_`);
+    } else if (since) {
+      lines.push('');
+      lines.push(`_(Still unresolved since ${since} — this will keep showing up until it's sorted out.)_`);
+    }
+    return lines.join('\n');
+  }
 
   const lines = [];
   lines.push(`${emoji} *The drawer ${verb} ${gapLabel}* than it should${short ? "n't" : ''}.`);
@@ -511,11 +556,32 @@ function buildShiftAuditReport({ branchConfig, closingCount, openingCount, resul
     return lines.join('\n');
   }
 
+  // SUMMARY FIRST: one line per discrepancy, so the whole picture is
+  // scannable before diving into any single one's full math breakdown. A
+  // report with several mismatched currencies used to read as one long wall
+  // of repeated "Here's the math" sections — this puts the headline numbers
+  // up top and pushes the detail (and the specific questions) below it.
+  if (stillOpen.length > 0) {
+    lines.push(`*${stillOpen.length} discrepanc${stillOpen.length > 1 ? 'ies' : 'y'} this shift:*`);
+    for (const r of stillOpen) {
+      const emoji = CCY_EMOJI[r.ccy] || '•';
+      if (r.missingFromOpening && !r.missingFromClosing) {
+        lines.push(`${emoji} ${r.ccy}: not in the opening count, ${moneyLabel(r.ccy, r.actual)} at closing`);
+      } else if (r.missingFromClosing && !r.missingFromOpening) {
+        lines.push(`${emoji} ${r.ccy}: ${moneyLabel(r.ccy, r.expected)} at opening, not in the closing count`);
+      } else {
+        const short = r.diff < 0;
+        lines.push(`${emoji} ${r.ccy}: ${short ? 'short' : 'extra'} ${moneyLabel(r.ccy, Math.abs(r.diff))}`);
+      }
+    }
+    lines.push('');
+  }
+
   for (const r of stillOpen) {
     const openingAmount = (openingCount.totals && openingCount.totals[r.ccy] != null)
       ? openingCount.totals[r.ccy]
       : (openingCount.others && openingCount.others[r.ccy] != null ? openingCount.others[r.ccy] : 0);
-    lines.push(buildQuestionBlock(r.ccy, r.diff, tickets, openingAmount, r.expected, r.actual, r.since));
+    lines.push(buildQuestionBlock(r.ccy, r.diff, tickets, openingAmount, r.expected, r.actual, r.since, r.missingFromOpening, r.missingFromClosing));
     lines.push('');
   }
 
