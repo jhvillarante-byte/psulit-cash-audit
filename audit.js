@@ -24,7 +24,7 @@
 
 const { reconcile } = require('./reconcile');
 const { history, postMessage } = require('./slack');
-const { parseCashCount, parseTransaction } = require('./parse');
+const { parseCashCount, parseTransaction, parseExpenseEntry } = require('./parse');
 const { isScheduledOpening, isScheduledClosing, windowLabel } = require('./schedule');
 
 const TICKET_RE = /(?:VN|ARN|AR)\s*#?\s*0*\d+/i;
@@ -33,7 +33,17 @@ const TICKET_RE = /(?:VN|ARN|AR)\s*#?\s*0*\d+/i;
 // firstFlaggedLabel is a human date string (e.g. "Jul 17") captured the first
 // time this currency went out of balance, so later reports can say
 // "still unresolved since Jul 17" instead of re-flagging it as brand new.
-const OPEN_FLAGS = new Map();
+//
+// Two SEPARATE trackers, not one shared map — a Shift Audit question ("PHP
+// surplus during the trading day") and a Handover Check question ("does the
+// closing count match the next opening count") are answering completely
+// different questions. A currency matching in one report must NEVER silently
+// mark the other report's flag as resolved -- that previously caused a real
+// Shift Audit gap to be misreported as "fixed" just because an UNRELATED
+// overnight handover happened to match, which tells you nothing about
+// whether the original gap was ever explained.
+const SHIFT_AUDIT_FLAGS = new Map();
+const HANDOVER_FLAGS = new Map();
 
 const CCY_EMOJI = {
   USD: '💵', PHP: '💴', EUR: '💶', GBP: '💷',
@@ -80,7 +90,7 @@ function shouldPostFailureNotice(branch, kind) {
  * real report considers "already flagged" / "newly resolved").
  */
 async function runShiftAudit(closingEvent, closingCount, branchConfig, { dryRun = false } = {}) {
-  const { cashCountChannelId, transactionsChannelId } = branchConfig;
+  const { cashCountChannelId, transactionsChannelId, expensesChannelId } = branchConfig;
 
   try {
     const openingCount = await findPriorCount(
@@ -110,12 +120,36 @@ async function runShiftAudit(closingEvent, closingCount, branchConfig, { dryRun 
       .map(m => ({ parsed: parseTransaction(m.text), raw: m.text, ts: m.ts }))
       .filter(t => t.parsed);
 
+    // PHP also moves through the expenses channel — replenishments (payroll,
+    // petty cash top-ups) add PHP to the drawer outside any buy/sell ticket,
+    // and small cash expenses (trash bags, supplies, fares) remove it. Fold
+    // these into the same reconciliation so a real, logged replenishment
+    // doesn't show up as a mystery "extra PHP" surplus, the way the
+    // Sept 2 Alphaland shift's ₱63,466 gap turned out to be.
+    let expenseTotal = 0;
+    let expenseEntries = [];
+    if (expensesChannelId) {
+      const expenseMessages = await history(expensesChannelId, {
+        oldest: openingCount._ts,
+        latest: closingEvent.ts,
+        limit: 200
+      });
+      for (const m of expenseMessages) {
+        const parsed = parseExpenseEntry(m.text || '');
+        if (parsed) {
+          expenseTotal += parsed.amount;
+          expenseEntries.push({ ...parsed, raw: m.text, ts: m.ts });
+        }
+      }
+    }
+
     const openingTotals = stripUntracked({ ...openingCount.totals, ...openingCount.others });
     const closingTotals = stripUntracked({ ...closingCount.totals, ...closingCount.others });
-    const results = reconcile(openingTotals, closingTotals, tickets.map(t => t.parsed), {});
+    const adjustments = expenseTotal !== 0 ? { PHP: expenseTotal } : {};
+    const results = reconcile(openingTotals, closingTotals, tickets.map(t => t.parsed), adjustments);
 
     const report = buildShiftAuditReport({
-      branchConfig, closingCount, openingCount, results, tickets, dryRun
+      branchConfig, closingCount, openingCount, results, tickets, expenseEntries, dryRun
     });
 
     if (dryRun) return report;
@@ -315,16 +349,63 @@ function clientLabel(raw) {
  * direction, plus (if any transactions touched it) the single biggest one as
  * a lead — not a list, just one clue to start with.
  */
-function buildQuestionBlock(ccy, diff, tickets) {
+/**
+ * Builds a full, specific, easy-to-follow breakdown for one mismatched
+ * currency: the starting balance, what the transactions say should have
+ * happened, what was actually counted, and a short list of concrete
+ * yes/no-style questions a teller can answer without needing to do any
+ * math themselves. `openingAmount` is the currency's balance at the start
+ * of the shift, used to show the arithmetic in plain terms rather than
+ * just stating the final gap.
+ */
+function buildQuestionBlock(ccy, diff, tickets, openingAmount, expectedAmount, actualAmount, since) {
   const emoji = CCY_EMOJI[ccy] || '•';
   const short = diff < 0;
-  const label = moneyLabel(ccy, Math.abs(diff));
-  const verb = short ? 'is missing' : 'has extra';
+  const gapLabel = moneyLabel(ccy, Math.abs(diff));
+  const verb = short ? 'is short' : 'has extra';
 
   const lines = [];
-  lines.push(`${emoji} ${ccy} ${verb} ${label}`);
+  lines.push(`${emoji} *The drawer ${verb} ${gapLabel}* than it should${short ? "n't" : ''}.`);
+
+  // Plain-language math, so nobody has to trust the bot's arithmetic blind —
+  // every number here is something they can check against their own count.
+  lines.push('');
+  lines.push(`Here's the math:`);
+  lines.push(`• Started the shift with: ${moneyLabel(ccy, openingAmount)}`);
 
   const relevant = ticketsForCurrency(tickets, ccy);
+  if (relevant.length === 0) {
+    lines.push(`• No ${ccy} transactions were logged this shift`);
+  } else {
+    const sorted = [...relevant].sort((a, b) => {
+      const amtA = ccy === 'PHP' ? (a.parsed.phpAmount || 0) : Math.max(...a.parsed.movements.filter(m => m.ccy === ccy).map(m => m.fcyAmount));
+      const amtB = ccy === 'PHP' ? (b.parsed.phpAmount || 0) : Math.max(...b.parsed.movements.filter(m => m.ccy === ccy).map(m => m.fcyAmount));
+      return amtB - amtA;
+    });
+    const biggest = sorted[0];
+    const who = biggest.parsed.isWholesale ? 'a wholesale deal' : `${firstName(clientLabel(biggest.raw)) || 'a client'}`;
+    const amountLabel = ccy === 'PHP'
+      ? moneyLabel('PHP', biggest.parsed.phpAmount)
+      : (() => { const mv = biggest.parsed.movements.find(m => m.ccy === ccy); return `${fmt(mv.fcyAmount)} ${ccy}`; })();
+    // A retail ticket's BUY means the client handed US that currency (we
+    // bought it FROM them); a wholesale ticket's SELL means WE sold it TO
+    // the counterparty. Pick one verb, not two, so this doesn't read as
+    // "sold ... sold to".
+    const summaryVerb = biggest.parsed.isWholesale ? 'sold' : 'bought';
+    const preposition = biggest.parsed.isWholesale ? 'to' : 'from';
+    lines.push(`• ${relevant.length} transaction${relevant.length > 1 ? 's' : ''} happened (biggest: ${summaryVerb} ${amountLabel} ${preposition} ${who} at ${timeLabel(biggest.ts)})`);
+  }
+
+  lines.push(`• Based on those transactions, should have ended with: ${moneyLabel(ccy, expectedAmount)}`);
+  lines.push(`• But the actual count at closing was: ${moneyLabel(ccy, actualAmount)}`);
+  lines.push(`• *That's ${gapLabel} that isn't explained by any transaction.*`);
+  lines.push('');
+
+  // Concrete, answerable questions — not "can you check if this is right?"
+  // but specific things a teller can say yes/no to.
+  lines.push(`Questions:`);
+  let qNum = 1;
+  lines.push(`${qNum++}. Did anyone drop off extra cash into the drawer that wasn't from a client transaction (e.g. replenishment, change fund, an owner's deposit)?`);
   if (relevant.length > 0) {
     const sorted = [...relevant].sort((a, b) => {
       const amtA = ccy === 'PHP' ? (a.parsed.phpAmount || 0) : Math.max(...a.parsed.movements.filter(m => m.ccy === ccy).map(m => m.fcyAmount));
@@ -332,13 +413,20 @@ function buildQuestionBlock(ccy, diff, tickets) {
       return amtB - amtA;
     });
     const biggest = sorted[0];
-    const who = biggest.parsed.isWholesale ? 'wholesale' : firstName(clientLabel(biggest.raw));
-    if (ccy === 'PHP') {
-      lines.push(`Biggest transaction: ${who}, ${moneyLabel('PHP', biggest.parsed.phpAmount)} at ${timeLabel(biggest.ts)}.`);
-    } else {
-      const mv = biggest.parsed.movements.find(m => m.ccy === ccy);
-      lines.push(`Biggest transaction: ${who}, ${fmt(mv.fcyAmount)} ${ccy} at ${timeLabel(biggest.ts)}.`);
-    }
+    const who = biggest.parsed.isWholesale ? 'the wholesale deal' : (firstName(clientLabel(biggest.raw)) || 'that client');
+    const amountLabel = ccy === 'PHP'
+      ? moneyLabel('PHP', biggest.parsed.phpAmount)
+      : (() => { const mv = biggest.parsed.movements.find(m => m.ccy === ccy); return `${fmt(mv.fcyAmount)} ${ccy}`; })();
+    lines.push(`${qNum++}. Was the ${timeLabel(biggest.ts)} transaction with ${who} (${amountLabel}) entered correctly — could it have been entered twice, or the amount typed wrong?`);
+  }
+  lines.push(`${qNum++}. Could the closing count have included cash that actually belongs to a different bucket (like Hive, Receivables, or petty cash)?`);
+
+  if (since === '(would be newly flagged)') {
+    lines.push('');
+    lines.push(`_(This would be a new question as of this report.)_`);
+  } else if (since) {
+    lines.push('');
+    lines.push(`_(Still unresolved since ${since} — this will keep showing up until it's sorted out.)_`);
   }
 
   return lines.join('\n');
@@ -349,17 +437,17 @@ function buildQuestionBlock(ccy, diff, tickets) {
  * back in balance (announcing the resolution), and tags anything still off
  * as either new or "still unresolved since <date>".
  */
-function annotateFlags(branch, results, dateLabel, dryRun = false) {
+function annotateFlags(flagStore, branch, results, dateLabel, dryRun = false) {
   const stillOpen = [];
   const resolved = [];
 
   for (const r of results) {
     const key = `${branch}|${r.ccy}`;
-    const prior = OPEN_FLAGS.get(key);
+    const prior = flagStore.get(key);
 
     if (r.match) {
       if (prior) {
-        if (!dryRun) OPEN_FLAGS.delete(key);
+        if (!dryRun) flagStore.delete(key);
         resolved.push({ ccy: r.ccy, since: prior.firstFlaggedLabel });
       }
       continue;
@@ -368,7 +456,7 @@ function annotateFlags(branch, results, dateLabel, dryRun = false) {
     if (prior) {
       stillOpen.push({ ...r, since: prior.firstFlaggedLabel });
     } else {
-      if (!dryRun) OPEN_FLAGS.set(key, { diff: r.diff, firstFlaggedLabel: dateLabel });
+      if (!dryRun) flagStore.set(key, { diff: r.diff, firstFlaggedLabel: dateLabel });
       stillOpen.push({ ...r, since: dryRun ? '(would be newly flagged)' : null });
     }
   }
@@ -376,9 +464,27 @@ function annotateFlags(branch, results, dateLabel, dryRun = false) {
   return { stillOpen, resolved };
 }
 
-function buildShiftAuditReport({ branchConfig, closingCount, openingCount, results, tickets, dryRun = false }) {
+/**
+ * Returns any currently-open Shift Audit flags for a branch, WITHOUT
+ * mutating them — used by the Handover Check to surface "there's still an
+ * unanswered question from an earlier shift" without touching the Shift
+ * Audit's own tracking (only a real Shift Audit run should ever resolve one
+ * of its own flags).
+ */
+function getOpenShiftAuditFlags(branch) {
+  const open = [];
+  for (const [key, value] of SHIFT_AUDIT_FLAGS.entries()) {
+    const [flagBranch, ccy] = key.split('|');
+    if (flagBranch === branch) {
+      open.push({ ccy, diff: value.diff, since: value.firstFlaggedLabel });
+    }
+  }
+  return open;
+}
+
+function buildShiftAuditReport({ branchConfig, closingCount, openingCount, results, tickets, expenseEntries = [], dryRun = false }) {
   const dateLabel = (closingCount.timestamp || '').split(',')[0].trim();
-  const { stillOpen, resolved } = annotateFlags(branchConfig.name, results, dateLabel, dryRun);
+  const { stillOpen, resolved } = annotateFlags(SHIFT_AUDIT_FLAGS, branchConfig.name, results, dateLabel, dryRun);
 
   const openName = firstName(openingCount.teller);
   const closeName = firstName(closingCount.teller);
@@ -389,13 +495,27 @@ function buildShiftAuditReport({ branchConfig, closingCount, openingCount, resul
   lines.push(`${openName} (opened) → ${closeName} (closed)`);
   lines.push('');
 
+  // Surface any replenishments/expenses that were already folded into the
+  // math, so a clean result doesn't look suspiciously "too clean" and a
+  // flagged result doesn't get a redundant question about something that's
+  // already accounted for.
+  if (expenseEntries.length > 0) {
+    const netLabel = expenseEntries.reduce((s, e) => s + e.amount, 0);
+    const sign = netLabel >= 0 ? '+' : '';
+    lines.push(`💼 ${expenseEntries.length} expense/replenishment entr${expenseEntries.length > 1 ? 'ies' : 'y'} this shift (net ${sign}${moneyLabel('PHP', netLabel)}) already included below.`);
+    lines.push('');
+  }
+
   if (stillOpen.length === 0 && resolved.length === 0) {
     lines.push(`✅ All good. ${tickets.length} transactions checked, everything matches.`);
     return lines.join('\n');
   }
 
   for (const r of stillOpen) {
-    lines.push(buildQuestionBlock(r.ccy, r.diff, tickets));
+    const openingAmount = (openingCount.totals && openingCount.totals[r.ccy] != null)
+      ? openingCount.totals[r.ccy]
+      : (openingCount.others && openingCount.others[r.ccy] != null ? openingCount.others[r.ccy] : 0);
+    lines.push(buildQuestionBlock(r.ccy, r.diff, tickets, openingAmount, r.expected, r.actual, r.since));
     lines.push('');
   }
 
@@ -412,7 +532,8 @@ function buildShiftAuditReport({ branchConfig, closingCount, openingCount, resul
 function buildQuestionReport({ branchConfig, title, dateLabel, windowText, openingTeller,
   closingTeller, txCount, txLabel, results, dryRun = false }) {
 
-  const { stillOpen, resolved } = annotateFlags(branchConfig.name, results, dateLabel, dryRun);
+  const { stillOpen, resolved } = annotateFlags(HANDOVER_FLAGS, branchConfig.name, results, dateLabel, dryRun);
+  const openShiftAuditFlags = getOpenShiftAuditFlags(branchConfig.name);
 
   const openName = firstName(openingTeller);
   const closeName = firstName(closingTeller);
@@ -423,27 +544,60 @@ function buildQuestionReport({ branchConfig, title, dateLabel, windowText, openi
   lines.push(`${openName} → ${closeName}`);
   lines.push('');
 
-  if (stillOpen.length === 0 && resolved.length === 0) {
-    lines.push('✅ All good. Nothing missing before trading starts.');
+  const hasOvernightIssue = stillOpen.length > 0;
+  const hasLeftoverQuestion = openShiftAuditFlags.length > 0;
+
+  // Section 1: the overnight consistency check itself — did the closing
+  // count match this opening count? This is ALWAYS shown, clean or not, so
+  // "all good" here is never confused with "no open questions anywhere."
+  if (!hasOvernightIssue) {
+    lines.push('✅ Overnight is fine — nothing moved that shouldn\'t have.');
+  } else {
+    lines.push('⚠️ *1 new thing doesn\'t match — please check before trading:*'
+      .replace('1 new thing', stillOpen.length > 1 ? `${stillOpen.length} new things` : '1 new thing'));
+    for (const r of stillOpen) {
+      const emoji = CCY_EMOJI[r.ccy] || '•';
+      const short = r.diff < 0;
+      const label = moneyLabel(r.ccy, Math.abs(r.diff));
+      const verb = short ? 'is short by' : 'has extra';
+      lines.push(`${emoji} *${r.ccy}* ${verb} ${label}${short ? '' : ' than expected'}. Can you check what happened between the two counts?`);
+    }
+  }
+
+  for (const r of resolved) {
+    lines.push('');
+    lines.push(`✅ ${r.ccy} is fixed now.`);
+  }
+
+  // Section 2: any Shift Audit question from an EARLIER shift that's still
+  // unanswered. Kept visually separate from Section 1 (a blank line + its
+  // own ⚠️ header) so nobody reads this as part of the overnight check —
+  // it's a different question, about a different comparison, that just
+  // happens to still be waiting for a reply.
+  if (hasLeftoverQuestion) {
+    lines.push('');
+    lines.push(`⚠️ *There${openShiftAuditFlags.length > 1 ? ' are' : '\'s'} still ${openShiftAuditFlags.length > 1 ? 'open questions' : 'an open question'} from ${openShiftAuditFlags.length > 1 ? 'earlier shifts' : 'yesterday\'s shift'}:*`);
+    lines.push('');
+    for (const f of openShiftAuditFlags) {
+      const emoji = CCY_EMOJI[f.ccy] || '•';
+      const short = f.diff < 0;
+      const label = moneyLabel(f.ccy, Math.abs(f.diff));
+      const verb = short ? 'was short' : 'had extra';
+      const sinceLabel = f.since ? ` (from the ${f.since} shift)` : '';
+      lines.push(`${emoji} The drawer ${verb} ${label} that was never explained${sinceLabel}.`);
+    }
+  }
+
+  if (!hasOvernightIssue && !hasLeftoverQuestion) {
     return lines.join('\n');
   }
 
-  for (const r of stillOpen) {
-    const emoji = CCY_EMOJI[r.ccy] || '•';
-    const short = r.diff < 0;
-    const label = moneyLabel(r.ccy, Math.abs(r.diff));
-    const verb = short ? 'is missing' : 'has extra';
-    lines.push(`${emoji} ${r.ccy} ${verb} ${label}`);
-  }
   lines.push('');
-
-  for (const r of resolved) {
-    lines.push(`✅ ${r.ccy} is fixed now.`);
-  }
-  if (resolved.length) lines.push('');
-
   const who = [openName, closeName].filter((v, i, a) => a.indexOf(v) === i);
-  lines.push(`${who.map(n => '@' + n).join(' ')} — please check before trading. Reply here 🙏`);
+  const askVerb = hasLeftoverQuestion && !hasOvernightIssue
+    ? 'this is still waiting on an answer'
+    : (hasLeftoverQuestion ? 'please check both' : 'please check before trading');
+  lines.push(`${who.map(n => '@' + n).join(' ')} — ${askVerb}. Reply here 🙏`);
   return lines.join('\n');
 }
 
