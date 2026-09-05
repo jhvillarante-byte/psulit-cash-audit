@@ -23,7 +23,7 @@
  */
 
 const { reconcile } = require('./reconcile');
-const { history, postMessage } = require('./slack');
+const { history, postMessage, replyInThread } = require('./slack');
 const { parseCashCount, parseTransaction, parseExpenseEntry } = require('./parse');
 const { isScheduledOpening, isScheduledClosing, windowLabel } = require('./schedule');
 
@@ -44,16 +44,6 @@ const TICKET_RE = /(?:VN|ARN|AR)\s*#?\s*0*\d+/i;
 // whether the original gap was ever explained.
 const SHIFT_AUDIT_FLAGS = new Map();
 const HANDOVER_FLAGS = new Map();
-
-// Tracks which posted messages are "awaiting a reply" for the computation-
-// on-demand feature: key = the Slack ts of the SHORT summary message we
-// just posted, value = { branchName, kind: 'shift-audit' | 'handover' }.
-// server.js checks this when a thread reply comes in, to know whether to
-// post the full math breakdown and which builder function to use.
-// In-memory only — same caveat as the flag stores above: a reply on an old
-// thread stops being recognized after a redeploy. Given replies typically
-// happen within the same day, this is an acceptable tradeoff for now.
-const AWAITING_REPLY = new Map();
 
 const CCY_EMOJI = {
   USD: '💵', PHP: '💴', EUR: '💶', GBP: '💷',
@@ -183,11 +173,19 @@ async function runShiftAudit(closingEvent, closingCount, branchConfig, { dryRun 
 
     if (dryRun) return report;
     const posted = await postMessage(cashCountChannelId, report);
-    // Only track for a reply if there's actually something to compute —
-    // no point listening for a reply on a clean "all good" message.
+
+    // No reply-listening at all — the full math auto-posts immediately as a
+    // threaded reply under the short summary, right away. This avoids the
+    // whole class of bug we hit twice with reply-triggered posting (a single
+    // real Slack webhook retry storm produced 75-79 duplicate posts, because
+    // "wait for a reply" meant listening for arbitrary incoming events that
+    // Slack can redeliver). Posting once, right here, in the same function
+    // call, has no such risk — there's nothing to listen for or deduplicate.
     const hasOpenDiscrepancies = results.some(r => !r.match);
     if (posted && posted.ts && hasOpenDiscrepancies) {
-      AWAITING_REPLY.set(posted.ts, { branchName: branchConfig.name, kind: 'shift-audit' });
+      const computation = buildComputationReply(branchConfig, tickets);
+      await replyInThread(cashCountChannelId, posted.ts, computation).catch(err =>
+        console.error('Failed to post computation reply:', err));
     }
 
   } catch (err) {
@@ -281,13 +279,9 @@ async function runCloseVsOpenCheck(openingEvent, openingCount, branchConfig, { d
     const posted = await postMessage(cashCountChannelId, report);
     const hasOpenDiscrepancies = asResults.some(r => !r.match);
     if (posted && posted.ts && hasOpenDiscrepancies) {
-      // Store the gap window too — a later reply needs to re-fetch the same
-      // gapTickets, since we don't keep the original array around in memory
-      // long-term (same reasoning as the flag stores: must survive a redeploy).
-      AWAITING_REPLY.set(posted.ts, {
-        branchName: branchConfig.name, kind: 'handover',
-        gapOldest: closingCount._ts, gapLatest: openingEvent.ts
-      });
+      const computation = buildHandoverComputationReply(branchConfig, gapTickets);
+      await replyInThread(cashCountChannelId, posted.ts, computation).catch(err =>
+        console.error('Failed to post handover computation reply:', err));
     }
 
   } catch (err) {
@@ -619,7 +613,7 @@ function buildShiftAuditReport({ branchConfig, closingCount, openingCount, resul
   if (resolved.length) lines.push('');
 
   const who = [openName, closeName].filter((v, i, a) => a.indexOf(v) === i);
-  lines.push(`${who.map(n => '@' + n).join(' ')} — can you explain these? Reply here and I'll walk through the numbers with you 🙏`);
+  lines.push(`${who.map(n => '@' + n).join(' ')} — can you explain these? See the thread below for the full math. 🙏`);
   return lines.join('\n');
 }
 
@@ -665,7 +659,7 @@ function buildComputationReply(branchConfig, tickets) {
   }
   lines.push(...sharedQuestions(openFlags));
   lines.push('');
-  lines.push(`Reply here once you've figured it out. 🙏`);
+  lines.push(`Let us know here once it's sorted out. 🙏`);
   return lines.join('\n');
 }
 
@@ -690,7 +684,7 @@ function buildHandoverComputationReply(branchConfig, gapTickets) {
   }
   lines.push(...sharedQuestions(openFlags));
   lines.push('');
-  lines.push(`Reply here once you've figured it out. 🙏`);
+  lines.push(`Let us know here once it's sorted out. 🙏`);
   return lines.join('\n');
 }
 
@@ -791,53 +785,9 @@ function fmt(n) {
   return (n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-/**
- * Single entry point for server.js: given the ts of a message someone just
- * replied to (in a thread), checks whether that message was one of our
- * short discrepancy summaries and, if so, returns the full computation text
- * to post back. Returns null if the ts isn't something we're tracking (so
- * server.js knows to do nothing — this wasn't a reply to one of our reports).
- *
- * `branchConfig` must be the SAME branch the original report was for — the
- * caller (server.js) already knows this from which channel the reply landed
- * in, so it's passed in rather than re-derived here.
- */
-async function handleThreadReply(threadTs, branchConfig) {
-  const awaiting = AWAITING_REPLY.get(threadTs);
-  if (!awaiting) return null;
-  if (awaiting.branchName !== branchConfig.name) return null; // shouldn't happen, but don't cross branches
-
-  if (awaiting.kind === 'shift-audit') {
-    return buildComputationReply(branchConfig, []);
-  }
-
-  if (awaiting.kind === 'handover') {
-    // Re-fetch the gap transactions fresh, rather than relying on an array
-    // held in memory since the original run (which may be long gone by the
-    // time a reply actually comes in).
-    const gapMessages = await history(branchConfig.transactionsChannelId, {
-      oldest: awaiting.gapOldest,
-      latest: awaiting.gapLatest,
-      limit: 100
-    });
-    const gapTickets = gapMessages
-      .filter(m => m.text && TICKET_RE.test(m.text))
-      .map(m => parseTransaction(m.text))
-      .filter(Boolean);
-    return buildHandoverComputationReply(branchConfig, gapTickets);
-  }
-
-  return null;
-}
-
 module.exports = {
   runShiftAudit,
   runCloseVsOpenCheck,
   isScheduledOpening,
-  isScheduledClosing,
-  buildComputationReply,
-  buildHandoverComputationReply,
-  getOpenShiftAuditFlags,
-  getOpenHandoverFlags,
-  handleThreadReply
+  isScheduledClosing
 };

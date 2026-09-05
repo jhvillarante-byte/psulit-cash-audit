@@ -1,12 +1,12 @@
 const { registerTestRoutes } = require('./test-routes');
 const { registerDebugRoutes } = require('./debug-routes');
-const { runShiftAudit, runCloseVsOpenCheck, isScheduledOpening, isScheduledClosing, handleThreadReply } = require('./audit');
+const { runShiftAudit, runCloseVsOpenCheck, isScheduledOpening, isScheduledClosing } = require('./audit');
 const express = require('express');
 const crypto = require('crypto');
 const axios = require('axios');
 const { parseCashCount, parseTransaction, parseHiveEntry, parseExpenseEntry } = require('./parse');
 const { reconcile } = require('./reconcile');
-const { history, replyInThread, postMessage, recoverFromReceiptImage, deepCheckMismatches } = require('./slack');
+const { history, postMessage, recoverFromReceiptImage, deepCheckMismatches } = require('./slack');
 const { broadcast } = require('./telegram');
 
 const app = express();
@@ -45,33 +45,18 @@ app.post('/slack/events', async (req, res) => {
   const branchConfig = BY_CASH_COUNT_CHANNEL.get(event.channel);
   if (!branchConfig) return;
 
-  // THREAD REPLY CHECK: a reply to one of our own short discrepancy
-  // summaries triggers the full computation, posted back in that same
-  // thread. This runs BEFORE the "must be a fresh cash count report" check
-  // below, since a reply is neither a new cash count nor something we want
-  // to dedupe via PROCESSED (a person can reply more than once, and each
-  // reply should be free to trigger the computation again if they want).
-  //
-  // event.thread_ts is present on any message that's a reply within a
-  // thread; it's ABSENT on the thread's own parent message and on any
-  // ordinary top-level message. A reply's own ts always differs from
-  // thread_ts (which points back at the parent), so this can't accidentally
-  // match on the summary message replying to itself.
-  if (event.thread_ts && event.thread_ts !== event.ts) {
-    try {
-      const computation = await handleThreadReply(event.thread_ts, branchConfig);
-      if (computation) {
-        await replyInThread(branchConfig.cashCountChannelId, event.thread_ts, computation);
-      }
-    } catch (err) {
-      console.error('handleThreadReply failed:', err);
-    }
-    return; // a thread reply is never also a fresh cash count report
-  }
-
-  if (!event.text.includes('PSULIT CASH COUNT REPORT')) return;
+  // NOTE: this used to also listen for thread replies (to post a full math
+  // breakdown on demand). That feature was removed — a single real reply
+  // getting redelivered by Slack's webhook retries produced 75-79 duplicate
+  // posts in production, twice. The full math now auto-posts immediately as
+  // a threaded reply right after the short summary (see audit.js), so there
+  // is nothing left here that listens for or reacts to incoming replies —
+  // eliminating that entire class of bug rather than trying to patch it
+  // further.
   if (PROCESSED.has(event.ts)) return;
   PROCESSED.add(event.ts);
+
+  if (!event.text.includes('PSULIT CASH COUNT REPORT')) return;
 
   try {
     await handleCashCount(event, branchConfig);
