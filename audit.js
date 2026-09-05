@@ -45,6 +45,16 @@ const TICKET_RE = /(?:VN|ARN|AR)\s*#?\s*0*\d+/i;
 const SHIFT_AUDIT_FLAGS = new Map();
 const HANDOVER_FLAGS = new Map();
 
+// Tracks which posted messages are "awaiting a reply" for the computation-
+// on-demand feature: key = the Slack ts of the SHORT summary message we
+// just posted, value = { branchName, kind: 'shift-audit' | 'handover' }.
+// server.js checks this when a thread reply comes in, to know whether to
+// post the full math breakdown and which builder function to use.
+// In-memory only — same caveat as the flag stores above: a reply on an old
+// thread stops being recognized after a redeploy. Given replies typically
+// happen within the same day, this is an acceptable tradeoff for now.
+const AWAITING_REPLY = new Map();
+
 const CCY_EMOJI = {
   USD: '💵', PHP: '💴', EUR: '💶', GBP: '💷',
   Hive: '🐝', Opex: '🧾'
@@ -172,7 +182,13 @@ async function runShiftAudit(closingEvent, closingCount, branchConfig, { dryRun 
     });
 
     if (dryRun) return report;
-    await postMessage(cashCountChannelId, report);
+    const posted = await postMessage(cashCountChannelId, report);
+    // Only track for a reply if there's actually something to compute —
+    // no point listening for a reply on a clean "all good" message.
+    const hasOpenDiscrepancies = results.some(r => !r.match);
+    if (posted && posted.ts && hasOpenDiscrepancies) {
+      AWAITING_REPLY.set(posted.ts, { branchName: branchConfig.name, kind: 'shift-audit' });
+    }
 
   } catch (err) {
     console.error('runShiftAudit error:', err);
@@ -262,7 +278,17 @@ async function runCloseVsOpenCheck(openingEvent, openingCount, branchConfig, { d
     });
 
     if (dryRun) return report;
-    await postMessage(cashCountChannelId, report);
+    const posted = await postMessage(cashCountChannelId, report);
+    const hasOpenDiscrepancies = asResults.some(r => !r.match);
+    if (posted && posted.ts && hasOpenDiscrepancies) {
+      // Store the gap window too — a later reply needs to re-fetch the same
+      // gapTickets, since we don't keep the original array around in memory
+      // long-term (same reasoning as the flag stores: must survive a redeploy).
+      AWAITING_REPLY.set(posted.ts, {
+        branchName: branchConfig.name, kind: 'handover',
+        gapOldest: closingCount._ts, gapLatest: openingEvent.ts
+      });
+    }
 
   } catch (err) {
     console.error('runCloseVsOpenCheck error:', err);
@@ -763,6 +789,45 @@ function fmt(n) {
   return (n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+/**
+ * Single entry point for server.js: given the ts of a message someone just
+ * replied to (in a thread), checks whether that message was one of our
+ * short discrepancy summaries and, if so, returns the full computation text
+ * to post back. Returns null if the ts isn't something we're tracking (so
+ * server.js knows to do nothing — this wasn't a reply to one of our reports).
+ *
+ * `branchConfig` must be the SAME branch the original report was for — the
+ * caller (server.js) already knows this from which channel the reply landed
+ * in, so it's passed in rather than re-derived here.
+ */
+async function handleThreadReply(threadTs, branchConfig) {
+  const awaiting = AWAITING_REPLY.get(threadTs);
+  if (!awaiting) return null;
+  if (awaiting.branchName !== branchConfig.name) return null; // shouldn't happen, but don't cross branches
+
+  if (awaiting.kind === 'shift-audit') {
+    return buildComputationReply(branchConfig, []);
+  }
+
+  if (awaiting.kind === 'handover') {
+    // Re-fetch the gap transactions fresh, rather than relying on an array
+    // held in memory since the original run (which may be long gone by the
+    // time a reply actually comes in).
+    const gapMessages = await history(branchConfig.transactionsChannelId, {
+      oldest: awaiting.gapOldest,
+      latest: awaiting.gapLatest,
+      limit: 100
+    });
+    const gapTickets = gapMessages
+      .filter(m => m.text && TICKET_RE.test(m.text))
+      .map(m => parseTransaction(m.text))
+      .filter(Boolean);
+    return buildHandoverComputationReply(branchConfig, gapTickets);
+  }
+
+  return null;
+}
+
 module.exports = {
   runShiftAudit,
   runCloseVsOpenCheck,
@@ -771,5 +836,6 @@ module.exports = {
   buildComputationReply,
   buildHandoverComputationReply,
   getOpenShiftAuditFlags,
-  getOpenHandoverFlags
+  getOpenHandoverFlags,
+  handleThreadReply
 };

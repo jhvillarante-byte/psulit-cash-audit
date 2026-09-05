@@ -1,6 +1,6 @@
 const { registerTestRoutes } = require('./test-routes');
 const { registerDebugRoutes } = require('./debug-routes');
-const { runShiftAudit, runCloseVsOpenCheck, isScheduledOpening, isScheduledClosing } = require('./audit');
+const { runShiftAudit, runCloseVsOpenCheck, isScheduledOpening, isScheduledClosing, handleThreadReply } = require('./audit');
 const express = require('express');
 const crypto = require('crypto');
 const axios = require('axios');
@@ -44,6 +44,31 @@ app.post('/slack/events', async (req, res) => {
   console.log(`Received message in ${event.channel} (subtype: ${event.subtype || 'none'}): ${event.text.slice(0, 60)}`);
   const branchConfig = BY_CASH_COUNT_CHANNEL.get(event.channel);
   if (!branchConfig) return;
+
+  // THREAD REPLY CHECK: a reply to one of our own short discrepancy
+  // summaries triggers the full computation, posted back in that same
+  // thread. This runs BEFORE the "must be a fresh cash count report" check
+  // below, since a reply is neither a new cash count nor something we want
+  // to dedupe via PROCESSED (a person can reply more than once, and each
+  // reply should be free to trigger the computation again if they want).
+  //
+  // event.thread_ts is present on any message that's a reply within a
+  // thread; it's ABSENT on the thread's own parent message and on any
+  // ordinary top-level message. A reply's own ts always differs from
+  // thread_ts (which points back at the parent), so this can't accidentally
+  // match on the summary message replying to itself.
+  if (event.thread_ts && event.thread_ts !== event.ts) {
+    try {
+      const computation = await handleThreadReply(event.thread_ts, branchConfig);
+      if (computation) {
+        await replyInThread(branchConfig.cashCountChannelId, event.thread_ts, computation);
+      }
+    } catch (err) {
+      console.error('handleThreadReply failed:', err);
+    }
+    return; // a thread reply is never also a fresh cash count report
+  }
+
   if (!event.text.includes('PSULIT CASH COUNT REPORT')) return;
   if (PROCESSED.has(event.ts)) return;
   PROCESSED.add(event.ts);
