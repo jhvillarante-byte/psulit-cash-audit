@@ -484,27 +484,6 @@ function buildQuestionBlock(ccy, diff, tickets, openingAmount, expectedAmount, a
   lines.push(`• Based on those transactions, should have ended with: ${moneyLabel(ccy, expectedAmount)}`);
   lines.push(`• But the actual count at closing was: ${moneyLabel(ccy, actualAmount)}`);
   lines.push(`• *That's ${gapLabel} that isn't explained by any transaction.*`);
-  lines.push('');
-
-  // Concrete, answerable questions — not "can you check if this is right?"
-  // but specific things a teller can say yes/no to.
-  lines.push(`Questions:`);
-  let qNum = 1;
-  lines.push(`${qNum++}. Did anyone drop off extra cash into the drawer that wasn't from a client transaction (e.g. replenishment, change fund, an owner's deposit)?`);
-  if (relevant.length > 0) {
-    const sorted = [...relevant].sort((a, b) => {
-      const amtA = ccy === 'PHP' ? (a.parsed.phpAmount || 0) : Math.max(...a.parsed.movements.filter(m => m.ccy === ccy).map(m => m.fcyAmount));
-      const amtB = ccy === 'PHP' ? (b.parsed.phpAmount || 0) : Math.max(...b.parsed.movements.filter(m => m.ccy === ccy).map(m => m.fcyAmount));
-      return amtB - amtA;
-    });
-    const biggest = sorted[0];
-    const who = biggest.parsed.isWholesale ? 'the wholesale deal' : (firstName(clientLabel(biggest.raw)) || 'that client');
-    const amountLabel = ccy === 'PHP'
-      ? moneyLabel('PHP', biggest.parsed.phpAmount)
-      : (() => { const mv = biggest.parsed.movements.find(m => m.ccy === ccy); return `${fmt(mv.fcyAmount)} ${ccy}`; })();
-    lines.push(`${qNum++}. Was the ${timeLabel(biggest.ts)} transaction with ${who} (${amountLabel}) entered correctly — could it have been entered twice, or the amount typed wrong?`);
-  }
-  lines.push(`${qNum++}. Could the closing count have included cash that actually belongs to a different bucket (like Hive, Receivables, or petty cash)?`);
 
   if (since === '(would be newly flagged)') {
     lines.push('');
@@ -653,6 +632,23 @@ function buildShiftAuditReport({ branchConfig, closingCount, openingCount, resul
  * after a Render restart, or the next day) — nothing here depends on
  * in-memory state from that original run except the flags themselves.
  */
+// One shared set of questions appended ONCE at the end of a computation
+// reply — not repeated after every currency's math. A currency flagged as
+// "missing from one count" already carries its own specific question
+// inline (see buildQuestionBlock above), so this generic list is only
+// worth including when at least one currency has REAL transaction-based
+// math to question (a genuine unexplained gap, not just an omitted line).
+function sharedQuestions(openFlags) {
+  const hasRealGap = openFlags.some(f => !f.missingFromOpening && !f.missingFromClosing);
+  if (!hasRealGap) return [];
+  return [
+    '',
+    'Questions:',
+    "1. Did anyone drop off extra cash into the drawer that wasn't from a client transaction (e.g. replenishment, change fund, an owner's deposit)?",
+    '2. Could the closing count have included cash that actually belongs to a different bucket (like Hive, Receivables, or petty cash)?'
+  ];
+}
+
 function buildComputationReply(branchConfig, tickets) {
   const openFlags = getOpenShiftAuditFlags(branchConfig.name);
   if (openFlags.length === 0) {
@@ -662,10 +658,13 @@ function buildComputationReply(branchConfig, tickets) {
   const lines = [];
   lines.push(`Here's the full math for ${branchConfig.name}:`);
   lines.push('');
-  for (const f of openFlags) {
+  for (let i = 0; i < openFlags.length; i++) {
+    const f = openFlags[i];
     lines.push(buildQuestionBlock(f.ccy, f.diff, tickets, f.openingAmount, f.expected, f.actual, f.since, f.missingFromOpening, f.missingFromClosing));
-    lines.push('');
+    if (i < openFlags.length - 1) lines.push(''); // blank line BETWEEN currencies only, not trailing
   }
+  lines.push(...sharedQuestions(openFlags));
+  lines.push('');
   lines.push(`Reply here once you've figured it out. 🙏`);
   return lines.join('\n');
 }
@@ -684,10 +683,13 @@ function buildHandoverComputationReply(branchConfig, gapTickets) {
   const lines = [];
   lines.push(`Here's the full math for ${branchConfig.name}'s handover:`);
   lines.push('');
-  for (const f of openFlags) {
+  for (let i = 0; i < openFlags.length; i++) {
+    const f = openFlags[i];
     lines.push(buildQuestionBlock(f.ccy, f.diff, gapTickets || [], f.openingAmount, f.expected, f.actual, f.since, f.missingFromOpening, f.missingFromClosing));
-    lines.push('');
+    if (i < openFlags.length - 1) lines.push('');
   }
+  lines.push(...sharedQuestions(openFlags));
+  lines.push('');
   lines.push(`Reply here once you've figured it out. 🙏`);
   return lines.join('\n');
 }
