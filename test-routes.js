@@ -48,7 +48,11 @@ const UNTRACKED_BUCKETS = [
 
 function stripUntracked(totals) {
   const copy = { ...totals };
-  for (const key of UNTRACKED_BUCKETS) delete copy[key];
+
+  for (const key of UNTRACKED_BUCKETS) {
+    delete copy[key];
+  }
+
   return copy;
 }
 
@@ -77,15 +81,17 @@ const CCY_SYMBOL = {
 
 function moneyLabel(ccy, amount) {
   const symbol = CCY_SYMBOL[ccy];
+
   return symbol
     ? `${symbol}${fmt(amount)}`
     : `${fmt(amount)} ${ccy}`;
 }
 
-/**
- * Finds newest matching cash count.
- */
-async function findMostRecent(channelId, branchName, predicate) {
+async function findMostRecent(
+  channelId,
+  branchName,
+  predicate
+) {
   let latest;
 
   for (let page = 0; page < MAX_PAGES; page++) {
@@ -118,9 +124,6 @@ async function findMostRecent(channelId, branchName, predicate) {
   return null;
 }
 
-/**
- * Finds the opening count immediately before a closing count.
- */
 async function findPriorCount(
   channelId,
   beforeTs,
@@ -167,15 +170,6 @@ async function findPriorCount(
   return null;
 }
 
-/**
- * Parses:
- *
- * opening=HKD:100
- *
- * or:
- *
- * opening=HKD:100,PHP:500000
- */
 function parseOpeningOverrides(raw) {
   const overrides = {};
 
@@ -191,6 +185,7 @@ function parseOpeningOverrides(raw) {
     if (!m) continue;
 
     const ccy = m[1].toUpperCase();
+
     const amount = parseFloat(
       m[2].replace(/,/g, '')
     );
@@ -204,30 +199,35 @@ function parseOpeningOverrides(raw) {
 }
 
 /**
- * Reads manually-posted Forex Fund cash movements in the
- * branch cash-count/general channel.
+ * Detects documented PHP cash movement into/out of Forex fund.
  *
- * Example:
+ * Examples it should catch:
  *
- * "Petty Cash returned to Forex fund — ₱1,459.16"
- *
- * = +₱1,459.16 into Forex cash.
+ * Petty Cash returned to Forex fund — ₱1,459.16
+ * Cash returned to Forex Fund ₱5,000
+ * Added to forex fund: PHP 10,000
+ * ₱3,000 transferred from Forex Fund
  */
 function parseForexFundMovement(text) {
   if (!text) return null;
 
-  if (!/forex\s+fund/i.test(text)) return null;
+  const normalized = text
+    .replace(/\u00A0/g, ' ')
+    .replace(/[–—]/g, '-')
+    .trim();
 
-  // Never count audit messages themselves as cash movements.
+  if (!/forex/i.test(normalized)) return null;
+
+  // Do not accidentally count reports as actual cash movements.
   if (
     /SHIFT AUDIT|HANDOVER CHECK|PSULIT CASH COUNT REPORT|full math/i.test(
-      text
+      normalized
     )
   ) {
     return null;
   }
 
-  const amountMatch = text.match(
+  const amountMatch = normalized.match(
     /(?:₱|PHP\s*)\s*([\d,]+(?:\.\d+)?)/i
   );
 
@@ -239,21 +239,32 @@ function parseForexFundMovement(text) {
 
   if (Number.isNaN(amount)) return null;
 
+  // Money goes INTO the Forex drawer/fund.
   const moneyIntoForex =
-    /returned\s+to\s+(?:the\s+)?forex\s+fund/i.test(text) ||
-    /added\s+to\s+(?:the\s+)?forex\s+fund/i.test(text) ||
-    /deposit(?:ed)?\s+to\s+(?:the\s+)?forex\s+fund/i.test(text) ||
-    /transferred\s+to\s+(?:the\s+)?forex\s+fund/i.test(text) ||
-    /replenish(?:ed|ment)?\s+(?:to\s+)?(?:the\s+)?forex\s+fund/i.test(
-      text
-    );
+    /return(?:ed)?[\s\S]{0,50}forex/i.test(normalized) ||
+    /added?[\s\S]{0,50}forex/i.test(normalized) ||
+    /deposit(?:ed)?[\s\S]{0,50}forex/i.test(normalized) ||
+    /replenish(?:ed|ment)?[\s\S]{0,50}forex/i.test(normalized) ||
+    /transfer(?:red)?[\s\S]{0,50}(?:to|into)[\s\S]{0,30}forex/i.test(
+      normalized
+    ) ||
+    /forex[\s\S]{0,30}(?:cash\s*)?in/i.test(normalized);
 
+  // Money leaves the Forex drawer/fund.
   const moneyOutOfForex =
-    /taken\s+from\s+(?:the\s+)?forex\s+fund/i.test(text) ||
-    /withdrawn\s+from\s+(?:the\s+)?forex\s+fund/i.test(text) ||
-    /paid\s+from\s+(?:the\s+)?forex\s+fund/i.test(text) ||
-    /transferred\s+from\s+(?:the\s+)?forex\s+fund/i.test(text) ||
-    /moved\s+from\s+(?:the\s+)?forex\s+fund/i.test(text);
+    /(?:taken|take)[\s\S]{0,50}from[\s\S]{0,30}forex/i.test(
+      normalized
+    ) ||
+    /withdraw(?:n)?[\s\S]{0,50}from[\s\S]{0,30}forex/i.test(
+      normalized
+    ) ||
+    /paid[\s\S]{0,50}from[\s\S]{0,30}forex/i.test(
+      normalized
+    ) ||
+    /transfer(?:red)?[\s\S]{0,50}from[\s\S]{0,30}forex/i.test(
+      normalized
+    ) ||
+    /forex[\s\S]{0,30}(?:cash\s*)?out/i.test(normalized);
 
   if (moneyIntoForex) {
     return {
@@ -282,9 +293,6 @@ function registerTestRoutes(app, BRANCHES) {
     ])
   );
 
-  /**
-   * EXISTING NORMAL SHIFT AUDIT
-   */
   app.get('/test/shift-audit', async (req, res) => {
     try {
       const branchConfig = byName.get(
@@ -354,13 +362,6 @@ function registerTestRoutes(app, BRANCHES) {
     }
   });
 
-  /**
-   * NEW — CORRECTED SHIFT AUDIT
-   *
-   * Example:
-   *
-   * /test/corrected-shift-audit?branch=Solaire&opening=HKD:100&dry=1
-   */
   app.get(
     '/test/corrected-shift-audit',
     async (req, res) => {
@@ -377,9 +378,7 @@ function registerTestRoutes(app, BRANCHES) {
           );
         }
 
-        /*
-         * 1. Find most recent scheduled closing.
-         */
+        // 1. Find most recent scheduled closing.
         const foundClosing =
           await findMostRecent(
             branchConfig.cashCountChannelId,
@@ -396,9 +395,7 @@ function registerTestRoutes(app, BRANCHES) {
         const closingMsg = foundClosing.msg;
         const closingCount = foundClosing.parsed;
 
-        /*
-         * 2. Find the scheduled opening before that closing.
-         */
+        // 2. Find scheduled opening before it.
         const foundOpening =
           await findPriorCount(
             branchConfig.cashCountChannelId,
@@ -416,9 +413,7 @@ function registerTestRoutes(app, BRANCHES) {
         const openingCount =
           foundOpening.parsed;
 
-        /*
-         * 3. Read all FX transactions.
-         */
+        // 3. Read all FX transactions.
         const txMessages = await history(
           branchConfig.transactionsChannelId,
           {
@@ -443,9 +438,7 @@ function registerTestRoutes(app, BRANCHES) {
           }))
           .filter(t => t.parsed);
 
-        /*
-         * 4. Read expense / replenishment channel.
-         */
+        // 4. Read expense/replenishment entries.
         let expenseTotal = 0;
         const expenseEntries = [];
 
@@ -478,15 +471,7 @@ function registerTestRoutes(app, BRANCHES) {
           }
         }
 
-        /*
-         * 5. Read cash movements posted directly
-         *    in Solaire / branch General.
-         *
-         *    This is what catches:
-         *
-         *    Petty Cash returned to Forex fund
-         *    ₱1,459.16
-         */
+        // 5. Read documented cash movements in branch/general channel.
         const generalMessages =
           await history(
             branchConfig.cashCountChannelId,
@@ -520,9 +505,7 @@ function registerTestRoutes(app, BRANCHES) {
             0
           );
 
-        /*
-         * 6. Build opening / closing balances.
-         */
+        // 6. Build opening/closing balances.
         const openingTotals =
           stripUntracked({
             ...openingCount.totals,
@@ -535,14 +518,7 @@ function registerTestRoutes(app, BRANCHES) {
             ...closingCount.others
           });
 
-        /*
-         * 7. Apply confirmed corrected opening values.
-         *
-         *    For today's Solaire test:
-         *
-         *    HKD 500 entered
-         *    HKD 100 confirmed correct.
-         */
+        // 7. Apply confirmed corrected opening values.
         const openingOverrides =
           parseOpeningOverrides(
             req.query.opening || ''
@@ -567,9 +543,7 @@ function registerTestRoutes(app, BRANCHES) {
           );
         }
 
-        /*
-         * 8. Combine documented PHP movements.
-         */
+        // 8. Combine all PHP movements outside FX tickets.
         const phpAdjustment =
           expenseTotal +
           forexMovementTotal;
@@ -581,9 +555,7 @@ function registerTestRoutes(app, BRANCHES) {
             phpAdjustment;
         }
 
-        /*
-         * 9. Reconcile.
-         */
+        // 9. Reconcile.
         const results = reconcile(
           openingTotals,
           closingTotals,
@@ -596,9 +568,7 @@ function registerTestRoutes(app, BRANCHES) {
             r => !r.match
           );
 
-        /*
-         * 10. Build bot report.
-         */
+        // 10. Build report.
         const dateLabel =
           (
             closingCount.timestamp || ''
@@ -727,12 +697,6 @@ function registerTestRoutes(app, BRANCHES) {
             );
         }
 
-        /*
-         * This posts USING SLACK_BOT_TOKEN.
-         * Therefore Slack will show:
-         *
-         * PSulit Cash Audit
-         */
         const posted =
           await postMessage(
             branchConfig.cashCountChannelId,
@@ -762,9 +726,6 @@ function registerTestRoutes(app, BRANCHES) {
     }
   );
 
-  /**
-   * EXISTING HANDOVER TEST
-   */
   app.get('/test/handover', async (req, res) => {
     try {
       const branchConfig = byName.get(
