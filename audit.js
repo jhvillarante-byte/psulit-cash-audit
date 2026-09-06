@@ -1,14 +1,13 @@
 /**
  * audit.js
  *
- * Two reports per branch per day, driven by schedule.js:
+ * Two automatic checks:
+ * 1) SHIFT AUDIT at the scheduled closing count.
+ * 2) HANDOVER CHECK at the next scheduled opening count.
  *
- *   Report 1 — CLOSING.
- *   Checks transactions + expenses/replenishments +
- *   documented Forex Fund cash movements against closing.
- *
- *   Report 2 — OPENING.
- *   Compares previous closing against new opening.
+ * Important: audit windows use the timestamp INSIDE the cash-count report,
+ * not the later Slack posting time. This prevents delayed Slack posts from
+ * accidentally excluding/including transactions.
  */
 
 const { reconcile } = require('./reconcile');
@@ -28,897 +27,398 @@ const {
 const {
   isScheduledOpening,
   isScheduledClosing,
-  windowLabel
+  windowLabel,
+  shiftDateForClose,
+  dateParts,
+  decimalHour
 } = require('./schedule');
 
+const TICKET_RE = /(?:VN|ARN|AR)\s*#?\s*0*\d+/i;
+const PAGE_SIZE = 200;
+const MAX_PAGES = 10;
 
-const TICKET_RE =
-  /(?:VN|ARN|AR)\s*#?\s*0*\d+/i;
-
-
-const SHIFT_AUDIT_FLAGS =
-  new Map();
-
-const HANDOVER_FLAGS =
-  new Map();
-
-
-const CCY_EMOJI = {
-  USD: '💵',
-  PHP: '💴',
-  EUR: '💶',
-  GBP: '💷',
-  Hive: '🐝',
-  Opex: '🧾'
-};
-
-
+// Non-physical / separately tracked buckets are intentionally excluded
+// from physical Forex drawer reconciliation.
 const UNTRACKED_BUCKETS = [
   'Hive',
   'Opex',
+  'JuanPay',
   'Scratch',
   'Receivables (PHP)',
   'Receivables (USD)'
 ];
 
+const SHIFT_AUDIT_FLAGS = new Map();
+const HANDOVER_FLAGS = new Map();
+
+const CCY_SYMBOL = {
+  PHP: '₱',
+  USD: '$',
+  GBP: '£',
+  EUR: '€',
+  AUD: 'A$',
+  CAD: 'C$',
+  SGD: 'S$',
+  HKD: 'HK$',
+  JPY: '¥',
+  KRW: '₩',
+  BND: 'B$',
+  SAR: 'SR',
+  THB: '฿',
+  CNY: '¥'
+};
+
+const CCY_EMOJI = {
+  PHP: '💴',
+  USD: '💵',
+  EUR: '💶',
+  GBP: '💷',
+  JPY: '💴',
+  KRW: '💴'
+};
+
+const LAST_FAILURE_NOTICE = new Map();
+const FAILURE_NOTICE_COOLDOWN_MS = 60 * 60 * 1000;
 
 function firstName(fullName) {
-  if (!fullName) {
-    return '?';
-  }
-
-  return fullName
-    .trim()
-    .split(/\s+/)[0];
+  if (!fullName) return '?';
+  return fullName.trim().split(/\s+/)[0];
 }
 
+function fmt(n) {
+  return Number(n || 0).toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  });
+}
 
-const LAST_FAILURE_NOTICE =
-  new Map();
+function moneyLabel(ccy, amount) {
+  const symbol = CCY_SYMBOL[ccy];
 
-const FAILURE_NOTICE_COOLDOWN_MS =
-  60 * 60 * 1000;
+  return symbol
+    ? `${symbol}${fmt(amount)}`
+    : `${fmt(amount)} ${ccy}`;
+}
 
-
-function shouldPostFailureNotice(
-  branch,
-  kind
-) {
-  const key =
-    `${branch}|${kind}`;
-
-  const last =
-    LAST_FAILURE_NOTICE.get(key);
-
-  const now =
-    Date.now();
+function shouldPostFailureNotice(branch, kind) {
+  const key = `${branch}|${kind}`;
+  const last = LAST_FAILURE_NOTICE.get(key);
+  const now = Date.now();
 
   if (
     last &&
-    now - last <
-      FAILURE_NOTICE_COOLDOWN_MS
+    now - last < FAILURE_NOTICE_COOLDOWN_MS
   ) {
     return false;
   }
 
-  LAST_FAILURE_NOTICE.set(
-    key,
-    now
-  );
-
+  LAST_FAILURE_NOTICE.set(key, now);
   return true;
 }
 
+/**
+ * Convert a report timestamp like:
+ * 09/06/2026, 10:14:34
+ * to a Slack-compatible epoch timestamp in Manila time (UTC+8).
+ */
+function countTimestampToSlackTs(timestamp) {
+  const m = String(timestamp || '').match(
+    /(\d{2})\/(\d{2})\/(\d{4}),\s*(\d{1,2}):(\d{2}):(\d{2})/
+  );
 
-/* ================================================================ */
-/* SHIFT AUDIT                                                      */
-/* ================================================================ */
+  if (!m) return null;
 
-async function runShiftAudit(
-  closingEvent,
-  closingCount,
-  branchConfig,
-  { dryRun = false } = {}
+  const month = Number(m[1]);
+  const day = Number(m[2]);
+  const year = Number(m[3]);
+  const hour = Number(m[4]);
+  const minute = Number(m[5]);
+  const second = Number(m[6]);
+
+  const epochMs = Date.UTC(
+    year,
+    month - 1,
+    day,
+    hour - 8,
+    minute,
+    second
+  );
+
+  return (epochMs / 1000).toFixed(6);
+}
+
+function stripUntracked(totals) {
+  const copy = {
+    ...totals
+  };
+
+  for (const key of UNTRACKED_BUCKETS) {
+    delete copy[key];
+  }
+
+  return copy;
+}
+
+function sameDateParts(a, b) {
+  return (
+    !!a &&
+    !!b &&
+    a.year === b.year &&
+    a.month === b.month &&
+    a.day === b.day
+  );
+}
+
+function shiftDatePartsForClosing(count) {
+  const d = dateParts(
+    count &&
+    count.timestamp
+  );
+
+  const h = decimalHour(
+    count &&
+    count.timestamp
+  );
+
+  if (!d || h == null) {
+    return d;
+  }
+
+  return shiftDateForClose(
+    count.branch,
+    d.year,
+    d.month,
+    d.day,
+    h
+  );
+}
+
+/**
+ * Find the scheduled opening belonging to THIS closing shift.
+ *
+ * This is safer than simply taking the nearest opening message,
+ * because a Mid-Shift opening can sometimes be close enough to
+ * the branch opening hour.
+ */
+async function findOpeningForClosing(
+  channelId,
+  closingSlackTs,
+  closingCount
 ) {
-  const {
-    cashCountChannelId,
-    transactionsChannelId,
-    expensesChannelId
-  } = branchConfig;
+  const wantedDate =
+    shiftDatePartsForClosing(
+      closingCount
+    );
 
+  let latest =
+    closingSlackTs;
 
-  try {
-    const openingCount =
-      await findPriorCount(
-        cashCountChannelId,
-        closingEvent.ts,
-        closingCount,
-        isScheduledOpening
-      );
+  let best =
+    null;
 
-
-    if (!openingCount) {
-      const msg =
-        `⚠️ *Shift Audit — ${branchConfig.name}*\n` +
-        `No opening count found for this shift (${windowLabel(closingCount)}) — can't check this one.`;
-
-      if (dryRun) {
-        return msg;
-      }
-
-      if (
-        shouldPostFailureNotice(
-          branchConfig.name,
-          'shift-no-opening'
-        )
-      ) {
-        await postMessage(
-          cashCountChannelId,
-          msg
-        );
-      }
-
-      return;
-    }
-
-
-    /* ------------------------------------------------------------ */
-    /* FOREX TRANSACTIONS                                           */
-    /* ------------------------------------------------------------ */
-
-    const txMessages =
+  for (
+    let page = 0;
+    page < MAX_PAGES;
+    page++
+  ) {
+    const msgs =
       await history(
-        transactionsChannelId,
+        channelId,
         {
-          oldest: openingCount._ts,
-          latest: closingEvent.ts,
-          limit: 500
-        }
-      );
-
-
-    const tickets =
-      txMessages
-        .filter(
-          m =>
-            m.text &&
-            TICKET_RE.test(m.text)
-        )
-        .map(
-          m => ({
-            parsed:
-              parseTransaction(
-                m.text
-              ),
-
-            raw:
-              m.text,
-
-            ts:
-              m.ts
-          })
-        )
-        .filter(
-          t =>
-            t.parsed
-        );
-
-
-    /* ------------------------------------------------------------ */
-    /* EXPENSES / REPLENISHMENTS                                    */
-    /* ------------------------------------------------------------ */
-
-    let expenseTotal = 0;
-
-    const expenseEntries = [];
-
-
-    if (expensesChannelId) {
-      const expenseMessages =
-        await history(
-          expensesChannelId,
-          {
-            oldest:
-              openingCount._ts,
-
-            latest:
-              closingEvent.ts,
-
-            limit:
-              200
-          }
-        );
-
-
-      const shiftDate =
-        (
-          closingCount.timestamp ||
-          ''
-        )
-          .split(',')[0]
-          .trim();
-
-
-      for (
-        const m of
-        expenseMessages
-      ) {
-        const text =
-          m.text || '';
-
-
-        /*
-         * If staff explicitly wrote a date
-         * inside the expense entry, use that
-         * date instead of blindly using the
-         * Slack posting date.
-         *
-         * Example:
-         *
-         * Sept 3, 2026
-         * returned advances
-         * amount: 63,466
-         *
-         * If posted Sept 5, it must NOT be
-         * included in Sept 5.
-         */
-
-        const entryDate =
-          statedExpenseDate(
-            text
-          );
-
-
-        if (
-          entryDate &&
-          shiftDate &&
-          entryDate !==
-            shiftDate
-        ) {
-          continue;
-        }
-
-
-        const parsed =
-          parseExpenseEntry(
-            text
-          );
-
-
-        if (parsed) {
-          expenseTotal +=
-            parsed.amount;
-
-
-          expenseEntries.push({
-            ...parsed,
-
-            raw:
-              text,
-
-            ts:
-              m.ts
-          });
-        }
-      }
-    }
-
-
-    /* ------------------------------------------------------------ */
-    /* FOREX FUND CASH MOVEMENTS                                    */
-    /* ------------------------------------------------------------ */
-
-    const generalMessages =
-      await history(
-        cashCountChannelId,
-        {
-          oldest:
-            openingCount._ts,
-
-          latest:
-            closingEvent.ts,
-
+          latest,
           limit:
-            500
+            PAGE_SIZE
         }
       );
 
-
-    const cashMovementEntries =
-      [];
-
+    if (!msgs.length) {
+      break;
+    }
 
     for (
-      const m of
-      generalMessages
+      const msg of
+      msgs
     ) {
-      const parsed =
-        parseForexFundMovement(
-          m.text || ''
-        );
-
-
-      if (!parsed) {
+      if (
+        parseFloat(msg.ts) >=
+        parseFloat(closingSlackTs)
+      ) {
         continue;
       }
 
-
-      cashMovementEntries.push({
-        ...parsed,
-
-        ts:
-          m.ts
-      });
-    }
-
-
-    const cashMovementTotal =
-      cashMovementEntries.reduce(
-        (
-          sum,
-          movement
-        ) =>
-          sum +
-          movement.amount,
-
-        0
-      );
-
-
-    /* ------------------------------------------------------------ */
-    /* OPENING / CLOSING TOTALS                                     */
-    /* ------------------------------------------------------------ */
-
-    const openingTotals =
-      stripUntracked({
-        ...openingCount.totals,
-        ...openingCount.others
-      });
-
-
-    const closingTotals =
-      stripUntracked({
-        ...closingCount.totals,
-        ...closingCount.others
-      });
-
-
-    /*
-     * PHP reconciliation:
-     *
-     * opening
-     * + forex transaction effect
-     * + expense / replenishment effect
-     * + documented cash movement
-     * = expected closing
-     */
-
-    const phpAdjustment =
-      expenseTotal +
-      cashMovementTotal;
-
-
-    const adjustments =
-      phpAdjustment !== 0
-        ? {
-            PHP:
-              phpAdjustment
-          }
-        : {};
-
-
-    const results =
-      reconcile(
-        openingTotals,
-        closingTotals,
-        tickets.map(
-          t =>
-            t.parsed
-        ),
-        adjustments
-      );
-
-
-    for (
-      const r of
-      results
-    ) {
-      r.missingFromOpening =
-        !(
-          r.ccy in
-          openingTotals
+      const parsed =
+        parseCashCount(
+          msg.text || ''
         );
-
-
-      r.missingFromClosing =
-        !(
-          r.ccy in
-          closingTotals
-        );
-
-
-      r.openingAmount =
-        openingCount.totals &&
-        openingCount.totals[
-          r.ccy
-        ] != null
-          ? openingCount
-              .totals[
-                r.ccy
-              ]
-
-          : (
-              openingCount.others &&
-              openingCount.others[
-                r.ccy
-              ] != null
-                ? openingCount
-                    .others[
-                      r.ccy
-                    ]
-
-                : 0
-            );
-    }
-
-
-    const report =
-      buildShiftAuditReport({
-        branchConfig,
-        closingCount,
-        openingCount,
-        results,
-        tickets,
-        expenseEntries,
-        cashMovementEntries,
-        dryRun
-      });
-
-
-    if (dryRun) {
-      return report;
-    }
-
-
-    const posted =
-      await postMessage(
-        cashCountChannelId,
-        report
-      );
-
-
-    const hasOpenDiscrepancies =
-      results.some(
-        r =>
-          !r.match
-      );
-
-
-    if (
-      posted &&
-      posted.ts &&
-      hasOpenDiscrepancies
-    ) {
-      const computation =
-        buildComputationReply(
-          branchConfig,
-          tickets
-        );
-
-
-      await replyInThread(
-        cashCountChannelId,
-        posted.ts,
-        computation
-      ).catch(
-        err =>
-          console.error(
-            'Failed to post computation reply:',
-            err
-          )
-      );
-    }
-
-  } catch (err) {
-    console.error(
-      'runShiftAudit error:',
-      err
-    );
-
-
-    const msg =
-      `⚠️ Audit bot error for ${branchConfig.name}: ${err.message}\n\n` +
-      `${err.stack || ''}`;
-
-
-    if (dryRun) {
-      return msg;
-    }
-
-
-    if (
-      shouldPostFailureNotice(
-        branchConfig.name,
-        'shift-error'
-      )
-    ) {
-      await postMessage(
-        branchConfig
-          .cashCountChannelId,
-
-        msg
-      ).catch(
-        () => {}
-      );
-    }
-  }
-}
-
-
-/* ================================================================ */
-/* HANDOVER CHECK                                                    */
-/* ================================================================ */
-
-async function runCloseVsOpenCheck(
-  openingEvent,
-  openingCount,
-  branchConfig,
-  { dryRun = false } = {}
-) {
-  const {
-    cashCountChannelId,
-    transactionsChannelId
-  } = branchConfig;
-
-
-  try {
-    const closingCount =
-      await findPriorCount(
-        cashCountChannelId,
-        openingEvent.ts,
-        openingCount,
-        isScheduledClosing
-      );
-
-
-    if (!closingCount) {
-      const msg =
-        `⚠️ *Handover Check — ${branchConfig.name}*\n` +
-        `No prior closing count found to compare against.`;
-
-
-      if (dryRun) {
-        return msg;
-      }
-
 
       if (
-        shouldPostFailureNotice(
-          branchConfig.name,
-          'handover-no-closing'
-        )
+        !parsed ||
+        parsed.branch !==
+          closingCount.branch
       ) {
-        await postMessage(
-          cashCountChannelId,
-          msg
-        );
+        continue;
       }
 
+      if (
+        !isScheduledOpening(
+          parsed
+        )
+      ) {
+        continue;
+      }
 
-      return;
+      const d =
+        dateParts(
+          parsed.timestamp
+        );
+
+      if (
+        wantedDate &&
+        !sameDateParts(
+          d,
+          wantedDate
+        )
+      ) {
+        continue;
+      }
+
+      const ts =
+        countTimestampToSlackTs(
+          parsed.timestamp
+        ) ||
+        msg.ts;
+
+      if (
+        !best ||
+        parseFloat(ts) <
+          parseFloat(
+            best.boundaryTs
+          )
+      ) {
+        best = {
+          ...parsed,
+          _ts:
+            msg.ts,
+          boundaryTs:
+            ts
+        };
+      }
     }
 
+    if (
+      msgs.length <
+      PAGE_SIZE
+    ) {
+      break;
+    }
 
-    const gapMessages =
+    latest =
+      (
+        parseFloat(
+          msgs[
+            msgs.length - 1
+          ].ts
+        ) -
+        0.000001
+      ).toFixed(6);
+  }
+
+  return best;
+}
+
+async function findPriorScheduledClosing(
+  channelId,
+  beforeSlackTs,
+  referenceCount
+) {
+  let latest =
+    beforeSlackTs;
+
+  for (
+    let page = 0;
+    page < MAX_PAGES;
+    page++
+  ) {
+    const msgs =
       await history(
-        transactionsChannelId,
+        channelId,
         {
-          oldest:
-            closingCount._ts,
-
-          latest:
-            openingEvent.ts,
-
+          latest,
           limit:
-            100
+            PAGE_SIZE
         }
       );
 
-
-    const gapTickets =
-      gapMessages
-        .filter(
-          m =>
-            m.text &&
-            TICKET_RE.test(
-              m.text
-            )
-        )
-        .map(
-          m =>
-            parseTransaction(
-              m.text
-            )
-        )
-        .filter(Boolean);
-
-
-    const closingTotals =
-      stripUntracked({
-        ...closingCount.totals,
-        ...closingCount.others
-      });
-
-
-    const openingTotals =
-      stripUntracked({
-        ...openingCount.totals,
-        ...openingCount.others
-      });
-
-
-    const allCcy =
-      new Set([
-        ...Object.keys(
-          closingTotals
-        ),
-
-        ...Object.keys(
-          openingTotals
-        )
-      ]);
-
-
-    const asResults =
-      [];
-
+    if (!msgs.length) {
+      break;
+    }
 
     for (
-      const ccy of
-      allCcy
+      const msg of
+      msgs
     ) {
-      const closeVal =
-        closingTotals[
-          ccy
-        ] || 0;
+      if (
+        parseFloat(msg.ts) >=
+        parseFloat(beforeSlackTs)
+      ) {
+        continue;
+      }
 
-
-      const openVal =
-        openingTotals[
-          ccy
-        ] || 0;
-
-
-      const diff =
-        openVal -
-        closeVal;
-
-
-      const tolerance =
-        ccy === 'PHP'
-          ? 1
-          : 0.01;
-
-
-      const gapMovement =
-        movementFor(
-          gapTickets,
-          ccy
+      const parsed =
+        parseCashCount(
+          msg.text || ''
         );
 
+      if (
+        !parsed ||
+        parsed.branch !==
+          referenceCount.branch
+      ) {
+        continue;
+      }
 
-      const netDiff =
-        diff -
-        gapMovement;
+      if (
+        !isScheduledClosing(
+          parsed
+        )
+      ) {
+        continue;
+      }
 
+      return {
+        ...parsed,
 
-      asResults.push({
-        ccy,
+        _ts:
+          msg.ts,
 
-        expected:
-          closeVal +
-          gapMovement,
-
-        actual:
-          openVal,
-
-        diff:
-          Math.round(
-            netDiff *
-              100
-          ) / 100,
-
-        match:
-          Math.abs(
-            netDiff
-          ) <=
-          tolerance
-      });
+        boundaryTs:
+          countTimestampToSlackTs(
+            parsed.timestamp
+          ) ||
+          msg.ts
+      };
     }
-
-
-    for (
-      const r of
-      asResults
-    ) {
-      r.missingFromOpening =
-        !(
-          r.ccy in
-          closingTotals
-        );
-
-
-      r.missingFromClosing =
-        !(
-          r.ccy in
-          openingTotals
-        );
-
-
-      r.openingAmount =
-        closingTotals[
-          r.ccy
-        ] != null
-          ? closingTotals[
-              r.ccy
-            ]
-          : 0;
-    }
-
-
-    const report =
-      buildQuestionReport({
-        branchConfig,
-
-        title:
-          'HANDOVER CHECK',
-
-        dateLabel:
-          (
-            openingCount.timestamp ||
-            ''
-          )
-            .split(',')[0]
-            .trim(),
-
-        windowText:
-          `Close ${
-            (
-              closingCount.timestamp ||
-              ''
-            )
-              .split(',')[1]
-              ?.trim() ||
-            '?'
-          } → Open ${
-            (
-              openingCount.timestamp ||
-              ''
-            )
-              .split(',')[1]
-              ?.trim() ||
-            '?'
-          }`,
-
-        openingTeller:
-          closingCount.teller,
-
-        closingTeller:
-          openingCount.teller,
-
-        txCount:
-          gapTickets.length,
-
-        txLabel:
-          'transaction(s) posted in the gap',
-
-        results:
-          asResults,
-
-        gapTickets,
-
-        dryRun
-      });
-
-
-    if (dryRun) {
-      return report;
-    }
-
-
-    const posted =
-      await postMessage(
-        cashCountChannelId,
-        report
-      );
-
-
-    const hasOpenDiscrepancies =
-      asResults.some(
-        r =>
-          !r.match
-      );
-
 
     if (
-      posted &&
-      posted.ts &&
-      hasOpenDiscrepancies
+      msgs.length <
+      PAGE_SIZE
     ) {
-      const computation =
-        buildHandoverComputationReply(
-          branchConfig,
-          gapTickets
-        );
-
-
-      await replyInThread(
-        cashCountChannelId,
-        posted.ts,
-        computation
-      ).catch(
-        err =>
-          console.error(
-            'Failed to post handover computation reply:',
-            err
-          )
-      );
+      break;
     }
 
-  } catch (err) {
-    console.error(
-      'runCloseVsOpenCheck error:',
-      err
-    );
-
-
-    const msg =
-      `⚠️ Audit bot error (handover) for ${branchConfig.name}: ${err.message}\n\n` +
-      `${err.stack || ''}`;
-
-
-    if (dryRun) {
-      return msg;
-    }
-
-
-    if (
-      shouldPostFailureNotice(
-        branchConfig.name,
-        'handover-error'
-      )
-    ) {
-      await postMessage(
-        branchConfig
-          .cashCountChannelId,
-
-        msg
-      ).catch(
-        () => {}
-      );
-    }
+    latest =
+      (
+        parseFloat(
+          msgs[
+            msgs.length - 1
+          ].ts
+        ) -
+        0.000001
+      ).toFixed(6);
   }
+
+  return null;
 }
-
-
-/* ================================================================ */
-/* HELPERS                                                           */
-/* ================================================================ */
-
-
-/*
- * Reads an explicitly written date
- * from an expense message.
- *
- * Examples:
- *
- * Sept 3, 2026
- * September 3, 2026
- * date : Sept 2,2026
- *
- * Returns:
- * 09/03/2026
- */
 
 function statedExpenseDate(
   text
@@ -927,6 +427,34 @@ function statedExpenseDate(
     return null;
   }
 
+  const numeric =
+    String(text).match(
+      /\b(\d{1,2})\/(\d{1,2})\/(20\d{2})\b/
+    );
+
+  if (numeric) {
+    return [
+      String(
+        Number(
+          numeric[1]
+        )
+      ).padStart(
+        2,
+        '0'
+      ),
+
+      String(
+        Number(
+          numeric[2]
+        )
+      ).padStart(
+        2,
+        '0'
+      ),
+
+      numeric[3]
+    ].join('/');
+  }
 
   const monthMap = {
     jan: 1,
@@ -966,36 +494,30 @@ function statedExpenseDate(
     december: 12
   };
 
-
-  const match =
+  const m =
     String(text).match(
       /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})\s*,?\s*(20\d{2})\b/i
     );
 
-
-  if (!match) {
+  if (!m) {
     return null;
   }
 
-
   const month =
     monthMap[
-      match[1]
+      m[1]
         .toLowerCase()
     ];
 
-
   const day =
     Number(
-      match[2]
+      m[2]
     );
-
 
   const year =
     Number(
-      match[3]
+      m[3]
     );
-
 
   if (
     !month ||
@@ -1004,7 +526,6 @@ function statedExpenseDate(
   ) {
     return null;
   }
-
 
   return [
     String(month)
@@ -1023,54 +544,16 @@ function statedExpenseDate(
   ].join('/');
 }
 
-
-function stripUntracked(
-  totals
-) {
-  const copy = {
-    ...totals
-  };
-
-
-  for (
-    const key of
-    UNTRACKED_BUCKETS
-  ) {
-    delete copy[
-      key
-    ];
-  }
-
-
-  return copy;
-}
-
-
-/*
- * Reads natural-language PHP cash
- * movements posted to the general
- * channel.
- *
- * Examples:
- *
- * Petty Cash returned to Forex fund
- * amount: 1459.16
- *
- * Petty Cash retured to Forex fund
- * amount: 1459.16
- *
- * PHP 5,000 added to Forex fund
- *
- * Paid from Forex fund amount: 1000
+/**
+ * Reads natural-language PHP cash movements
+ * posted in the general channel.
  */
-
 function parseForexFundMovement(
   text
 ) {
   if (!text) {
     return null;
   }
-
 
   const normalized =
     String(text)
@@ -1084,7 +567,6 @@ function parseForexFundMovement(
       )
       .trim();
 
-
   if (
     !/forex/i.test(
       normalized
@@ -1093,12 +575,6 @@ function parseForexFundMovement(
     return null;
   }
 
-
-  /*
-   * Do not accidentally parse
-   * audit reports or cash counts.
-   */
-
   if (
     /SHIFT AUDIT|HANDOVER CHECK|PSULIT CASH COUNT REPORT|full math/i.test(
       normalized
@@ -1106,7 +582,6 @@ function parseForexFundMovement(
   ) {
     return null;
   }
-
 
   const amountMatch =
     normalized.match(
@@ -1117,11 +592,9 @@ function parseForexFundMovement(
       /\bamount\s*:?\s*₱?\s*([\d,]+(?:\.\d+)?)/i
     );
 
-
   if (!amountMatch) {
     return null;
   }
-
 
   const amount =
     parseFloat(
@@ -1132,7 +605,6 @@ function parseForexFundMovement(
         )
     );
 
-
   if (
     !Number.isFinite(
       amount
@@ -1140,7 +612,6 @@ function parseForexFundMovement(
   ) {
     return null;
   }
-
 
   const moneyIntoForex =
     /retur(?:n|ne|ned|ed|e|d)?[\s\S]{0,60}forex/i.test(
@@ -1171,7 +642,6 @@ function parseForexFundMovement(
       normalized
     );
 
-
   const moneyOutOfForex =
     /(?:taken|take)[\s\S]{0,60}from[\s\S]{0,30}forex/i.test(
       normalized
@@ -1197,21 +667,21 @@ function parseForexFundMovement(
       normalized
     );
 
-
-  if (moneyIntoForex) {
+  if (
+    moneyIntoForex
+  ) {
     return {
       amount,
-
       direction:
         'IN',
-
       raw:
         text
     };
   }
 
-
-  if (moneyOutOfForex) {
+  if (
+    moneyOutOfForex
+  ) {
     return {
       amount:
         -amount,
@@ -1224,580 +694,165 @@ function parseForexFundMovement(
     };
   }
 
-
   return null;
 }
 
-
-async function findPriorCount(
-  channelId,
-  beforeTs,
-  referenceCount,
-  predicate
+function transactionPhpEffect(
+  tx
 ) {
-  const PAGE_SIZE =
-    200;
-
-  const MAX_PAGES =
-    10;
-
-
-  let latest =
-    beforeTs;
-
-
-  for (
-    let page = 0;
-    page < MAX_PAGES;
-    page++
+  if (
+    !tx ||
+    tx.phpAmount ==
+      null
   ) {
-    const msgs =
-      await history(
-        channelId,
-        {
-          latest,
-          limit:
-            PAGE_SIZE
-        }
-      );
-
-
-    if (
-      msgs.length ===
-      0
-    ) {
-      break;
-    }
-
-
-    for (
-      const msg of
-      msgs
-    ) {
-      const parsed =
-        parseCashCount(
-          msg.text ||
-          ''
-        );
-
-
-      if (!parsed) {
-        continue;
-      }
-
-
-      if (
-        parsed.branch !==
-        referenceCount.branch
-      ) {
-        continue;
-      }
-
-
-      if (
-        !predicate(
-          parsed
-        )
-      ) {
-        continue;
-      }
-
-
-      return {
-        ...parsed,
-
-        _ts:
-          msg.ts
-      };
-    }
-
-
-    if (
-      msgs.length <
-      PAGE_SIZE
-    ) {
-      break;
-    }
-
-
-    latest =
-      (
-        parseFloat(
-          msgs[
-            msgs.length - 1
-          ].ts
-        ) -
-        0.000001
-      ).toFixed(6);
+    return 0;
   }
 
+  const first =
+    (
+      tx.movements ||
+      []
+    )[0];
 
-  return null;
-}
-
-
-function movementFor(
-  tickets,
-  ccy
-) {
-  let sum = 0;
-
-
-  for (
-    const tx of
-    tickets
-  ) {
-    for (
-      const mv of
-      (
-        tx.movements ||
-        []
-      )
-    ) {
-      if (
-        mv.ccy !==
-        ccy
-      ) {
-        continue;
-      }
-
-
-      const sign =
-        mv.action ===
-        'BUY'
-          ? 1
-          : -1;
-
-
-      sum +=
-        sign *
-        mv.fcyAmount;
-    }
+  if (!first) {
+    return 0;
   }
 
-
-  return sum;
+  return first.action ===
+    'BUY'
+      ? -tx.phpAmount
+      : tx.phpAmount;
 }
 
-
-function ticketsForCurrency(
-  tickets,
+function transactionEffectForCurrency(
+  tx,
   ccy
 ) {
   if (
     ccy ===
     'PHP'
   ) {
-    return tickets.filter(
-      t =>
-        t.parsed
-          .phpAmount !=
-        null
+    return transactionPhpEffect(
+      tx
     );
   }
 
+  let sum =
+    0;
 
-  return tickets.filter(
-    t =>
-      (
-        t.parsed
-          .movements ||
-        []
-      ).some(
-        mv =>
-          mv.ccy ===
-          ccy
-      )
-  );
-}
+  for (
+    const mv of
+    tx.movements ||
+    []
+  ) {
+    if (
+      mv.ccy !==
+      ccy
+    ) {
+      continue;
+    }
 
-
-function timeLabel(
-  ts
-) {
-  if (!ts) {
-    return '';
+    sum +=
+      mv.action ===
+        'BUY'
+          ? mv.fcyAmount
+          : -mv.fcyAmount;
   }
 
-
-  return new Date(
-    parseFloat(
-      ts
-    ) * 1000
-  ).toLocaleTimeString(
-    'en-PH',
-    {
-      timeZone:
-        'Asia/Manila',
-
-      hour:
-        'numeric',
-
-      minute:
-        '2-digit'
-    }
-  );
+  return sum;
 }
 
+function rawTicketRef(
+  ticket
+) {
+  const ref =
+    ticket &&
+    ticket.parsed &&
+    ticket.parsed.ref;
 
-function clientLabel(
+  return ref
+    ? `AR ${String(ref).padStart(7, '0')}`
+    : 'Transaction';
+}
+
+function expenseLabel(
   raw
 ) {
-  const m =
-    raw.match(
-      /(?:NEW|OLD)\s+CLIENT\s*:\s*([^\n]+)/i
+  const text =
+    String(
+      raw ||
+      ''
     );
 
+  const p =
+    text.match(
+      /Particulars?\s*:\s*([^\n]+)/i
+    );
 
-  return m
-    ? m[1].trim()
-    : null;
-}
-
-
-function buildQuestionBlock(
-  ccy,
-  diff,
-  tickets,
-  openingAmount,
-  expectedAmount,
-  actualAmount,
-  since,
-  missingFromOpening,
-  missingFromClosing
-) {
-  const emoji =
-    CCY_EMOJI[
-      ccy
-    ] ||
-    '•';
-
-
-  const short =
-    diff < 0;
-
-
-  const gapLabel =
-    moneyLabel(
-      ccy,
-      Math.abs(
-        diff
+  if (p) {
+    return p[1]
+      .replace(
+        /[*_]/g,
+        ''
       )
-    );
-
-
-  const verb =
-    short
-      ? 'is short'
-      : 'has extra';
-
-
-  if (
-    missingFromOpening &&
-    !missingFromClosing
-  ) {
-    const lines = [];
-
-
-    lines.push(
-      `${emoji} *${ccy} wasn't included in the opening count*, but the closing count shows ${moneyLabel(ccy, actualAmount)}.`
-    );
-
-
-    lines.push(
-      `This might just be a reporting gap rather than a real cash issue — can you confirm ${ccy} was actually ${moneyLabel(ccy, actualAmount)} at the start of the shift too?`
-    );
-
-
-    if (since) {
-      lines.push('');
-    }
-
-
-    if (
-      since ===
-      '(would be newly flagged)'
-    ) {
-      lines.push(
-        `_(This would be a new question as of this report.)_`
-      );
-
-    } else if (since) {
-      lines.push(
-        `_(Still unresolved since ${since} — this will keep showing up until it's sorted out.)_`
-      );
-    }
-
-
-    return lines.join(
-      '\n'
-    );
+      .trim();
   }
 
+  const first =
+    text
+      .split('\n')
+      .map(
+        s =>
+          s
+            .replace(
+              /[*_]/g,
+              ''
+            )
+            .trim()
+      )
+      .find(Boolean);
 
-  if (
-    missingFromClosing &&
-    !missingFromOpening
-  ) {
-    const lines = [];
-
-
-    lines.push(
-      `${emoji} *${ccy} was in the opening count* (${moneyLabel(ccy, openingAmount)}), *but wasn't included in the closing count.*`
-    );
-
-
-    lines.push(
-      `This might just be a reporting gap rather than money going missing — can you confirm what ${ccy} actually was at closing?`
-    );
-
-
-    if (
-      since ===
-      '(would be newly flagged)'
-    ) {
-      lines.push('');
-
-      lines.push(
-        `_(This would be a new question as of this report.)_`
-      );
-
-    } else if (since) {
-      lines.push('');
-
-      lines.push(
-        `_(Still unresolved since ${since} — this will keep showing up until it's sorted out.)_`
-      );
-    }
-
-
-    return lines.join(
-      '\n'
-    );
-  }
-
-
-  const lines = [];
-
-
-  lines.push(
-    `${emoji} *The drawer ${verb} ${gapLabel}* than it should${short ? "n't" : ''}.`
-  );
-
-
-  lines.push('');
-
-  lines.push(
-    `Here's the math:`
-  );
-
-
-  lines.push(
-    `• Started the shift with: ${moneyLabel(ccy, openingAmount)}`
-  );
-
-
-  const relevant =
-    ticketsForCurrency(
-      tickets,
-      ccy
-    );
-
-
-  if (
-    relevant.length ===
-    0
-  ) {
-    lines.push(
-      `• No ${ccy} transactions were logged this shift`
-    );
-
-  } else {
-    const sorted =
-      [...relevant].sort(
-        (
-          a,
-          b
-        ) => {
-          const amtA =
-            ccy ===
-            'PHP'
-              ? (
-                  a.parsed
-                    .phpAmount ||
-                  0
-                )
-
-              : Math.max(
-                  ...a.parsed
-                    .movements
-                    .filter(
-                      m =>
-                        m.ccy ===
-                        ccy
-                    )
-                    .map(
-                      m =>
-                        m.fcyAmount
-                    )
-                );
-
-
-          const amtB =
-            ccy ===
-            'PHP'
-              ? (
-                  b.parsed
-                    .phpAmount ||
-                  0
-                )
-
-              : Math.max(
-                  ...b.parsed
-                    .movements
-                    .filter(
-                      m =>
-                        m.ccy ===
-                        ccy
-                    )
-                    .map(
-                      m =>
-                        m.fcyAmount
-                    )
-                );
-
-
-          return (
-            amtB -
-            amtA
-          );
-        }
-      );
-
-
-    const biggest =
-      sorted[0];
-
-
-    const who =
-      biggest.parsed
-        .isWholesale
-
-        ? 'a wholesale deal'
-
-        : `${
-            firstName(
-              clientLabel(
-                biggest.raw
-              )
-            ) ||
-            'a client'
-          }`;
-
-
-    const amountLabel =
-      ccy ===
-      'PHP'
-        ? moneyLabel(
-            'PHP',
-
-            biggest
-              .parsed
-              .phpAmount
-          )
-
-        : (() => {
-            const mv =
-              biggest
-                .parsed
-                .movements
-                .find(
-                  m =>
-                    m.ccy ===
-                    ccy
-                );
-
-
-            return `${fmt(mv.fcyAmount)} ${ccy}`;
-          })();
-
-
-    const summaryVerb =
-      biggest.parsed
-        .isWholesale
-          ? 'sold'
-          : 'bought';
-
-
-    const preposition =
-      biggest.parsed
-        .isWholesale
-          ? 'to'
-          : 'from';
-
-
-    lines.push(
-      `• ${relevant.length} transaction${relevant.length > 1 ? 's' : ''} happened (biggest: ${summaryVerb} ${amountLabel} ${preposition} ${who} at ${timeLabel(biggest.ts)})`
-    );
-  }
-
-
-  lines.push(
-    `• Based on those transactions, should have ended with: ${moneyLabel(ccy, expectedAmount)}`
-  );
-
-
-  lines.push(
-    `• But the actual count at closing was: ${moneyLabel(ccy, actualAmount)}`
-  );
-
-
-  lines.push(
-    `• *That's ${gapLabel} that isn't explained by any transaction.*`
-  );
-
-
-  if (
-    since ===
-    '(would be newly flagged)'
-  ) {
-    lines.push('');
-
-    lines.push(
-      `_(This would be a new question as of this report.)_`
-    );
-
-  } else if (since) {
-    lines.push('');
-
-    lines.push(
-      `_(Still unresolved since ${since} — this will keep showing up until it's sorted out.)_`
-    );
-  }
-
-
-  return lines.join(
-    '\n'
-  );
+  return first ||
+    'Expense / replenishment';
 }
 
+function movementLabel(
+  raw
+) {
+  const first =
+    String(
+      raw ||
+      ''
+    )
+      .split('\n')
+      .map(
+        s =>
+          s
+            .replace(
+              /[*_]/g,
+              ''
+            )
+            .trim()
+      )
+      .find(Boolean);
 
-/* ================================================================ */
-/* DISCREPANCY TRACKING                                              */
-/* ================================================================ */
+  return first ||
+    'Forex Fund movement';
+}
 
 function annotateFlags(
-  flagStore,
+  store,
   branch,
   results,
   dateLabel,
-  dryRun = false,
-  cycleId = dateLabel
+  cycleId,
+  dryRun
 ) {
-  const stillOpen = [];
+  const stillOpen =
+    [];
 
-  const resolved = [];
-
+  const resolved =
+    [];
 
   for (
     const r of
@@ -1806,101 +861,55 @@ function annotateFlags(
     const key =
       `${branch}|${r.ccy}`;
 
-
     const prior =
-      flagStore.get(
+      store.get(
         key
       );
 
-
     if (r.match) {
-      /*
-       * Only the SAME audit cycle
-       * may resolve its own flag.
-       */
-
       if (
         prior &&
         prior.cycleId ===
           cycleId
       ) {
         if (!dryRun) {
-          flagStore.delete(
+          store.delete(
             key
           );
         }
-
 
         resolved.push({
           ccy:
             r.ccy,
 
           since:
-            prior
-              .firstFlaggedLabel,
-
-          correctedCount:
-            true
+            prior.dateLabel
         });
       }
-
 
       continue;
     }
 
-
-    if (prior) {
-      stillOpen.push({
-        ...r,
-
-        since:
-          prior
-            .firstFlaggedLabel
-      });
-
-    } else {
-      if (!dryRun) {
-        flagStore.set(
-          key,
-          {
-            diff:
-              r.diff,
-
-            firstFlaggedLabel:
-              dateLabel,
-
-            cycleId,
-
-            missingFromOpening:
-              r.missingFromOpening,
-
-            missingFromClosing:
-              r.missingFromClosing,
-
-            expected:
-              r.expected,
-
-            actual:
-              r.actual,
-
-            openingAmount:
-              r.openingAmount
-          }
-        );
-      }
-
-
-      stillOpen.push({
-        ...r,
-
-        since:
-          dryRun
-            ? '(would be newly flagged)'
-            : null
-      });
+    if (!dryRun) {
+      store.set(
+        key,
+        {
+          ...r,
+          dateLabel,
+          cycleId
+        }
+      );
     }
-  }
 
+    stillOpen.push({
+      ...r,
+
+      since:
+        prior
+          ? prior.dateLabel
+          : null
+    });
+  }
 
   return {
     stillOpen,
@@ -1908,101 +917,47 @@ function annotateFlags(
   };
 }
 
-
-function getOpenShiftAuditFlags(
+function getOpenShiftFlags(
   branch
 ) {
-  return getOpenFlagsFrom(
-    SHIFT_AUDIT_FLAGS,
-    branch
-  );
-}
-
-
-function getOpenHandoverFlags(
-  branch
-) {
-  return getOpenFlagsFrom(
-    HANDOVER_FLAGS,
-    branch
-  );
-}
-
-
-function getOpenFlagsFrom(
-  flagStore,
-  branch
-) {
-  const open = [];
-
+  const out =
+    [];
 
   for (
     const [
       key,
       value
     ] of
-    flagStore.entries()
+    SHIFT_AUDIT_FLAGS.entries()
   ) {
     const [
-      flagBranch,
-      ccy
+      flagBranch
     ] =
       key.split('|');
-
 
     if (
       flagBranch ===
       branch
     ) {
-      open.push({
-        ccy,
-
-        diff:
-          value.diff,
-
-        since:
-          value
-            .firstFlaggedLabel,
-
-        missingFromOpening:
-          value
-            .missingFromOpening,
-
-        missingFromClosing:
-          value
-            .missingFromClosing,
-
-        expected:
-          value.expected,
-
-        actual:
-          value.actual,
-
-        openingAmount:
-          value
-            .openingAmount
-      });
+      out.push(
+        value
+      );
     }
   }
 
-
-  return open;
+  return out;
 }
 
-
-/* ================================================================ */
-/* SHIFT AUDIT REPORT                                                */
-/* ================================================================ */
-
-function buildShiftAuditReport({
+function buildShiftSummary({
   branchConfig,
-  closingCount,
   openingCount,
-  results,
+  closingCount,
   tickets,
-  expenseEntries = [],
-  cashMovementEntries = [],
-  dryRun = false
+  expenseEntries,
+  cashMovementEntries,
+  stillOpen,
+  resolved,
+  dryRun
 }) {
   const dateLabel =
     (
@@ -2012,39 +967,8 @@ function buildShiftAuditReport({
       .split(',')[0]
       .trim();
 
-
-  const cycleId =
-    `${branchConfig.name}|shift|${dateLabel}|${windowLabel(closingCount)}`;
-
-
-  const {
-    stillOpen,
-    resolved
-  } =
-    annotateFlags(
-      SHIFT_AUDIT_FLAGS,
-      branchConfig.name,
-      results,
-      dateLabel,
-      dryRun,
-      cycleId
-    );
-
-
-  const openName =
-    firstName(
-      openingCount.teller
-    );
-
-
-  const closeName =
-    firstName(
-      closingCount.teller
-    );
-
-
-  const lines = [];
-
+  const lines =
+    [];
 
   if (dryRun) {
     lines.push(
@@ -2052,25 +976,20 @@ function buildShiftAuditReport({
     );
   }
 
-
   lines.push(
     `🔍 ${branchConfig.name} — ${dateLabel}, ${windowLabel(closingCount)}`
   );
 
-
   lines.push(
-    `${openName} (opened) → ${closeName} (closed)`
+    `${firstName(openingCount.teller)} (opened) → ${firstName(closingCount.teller)} (closed)`
   );
-
 
   lines.push('');
 
-
   if (
-    expenseEntries.length >
-    0
+    expenseEntries.length
   ) {
-    const netLabel =
+    const total =
       expenseEntries.reduce(
         (
           s,
@@ -2082,27 +1001,521 @@ function buildShiftAuditReport({
         0
       );
 
+    lines.push(
+      `💼 ${expenseEntries.length} expense/replenishment entr${expenseEntries.length > 1 ? 'ies' : 'y'} included (net ${total >= 0 ? '+' : '-'}${moneyLabel('PHP', Math.abs(total))}).`
+    );
+  }
 
-    const sign =
-      netLabel >= 0
-        ? '+'
-        : '';
+  if (
+    cashMovementEntries.length
+  ) {
+    const total =
+      cashMovementEntries.reduce(
+        (
+          s,
+          e
+        ) =>
+          s +
+          e.amount,
 
+        0
+      );
 
     lines.push(
-      `💼 ${expenseEntries.length} expense/replenishment entr${expenseEntries.length > 1 ? 'ies' : 'y'} this shift (net ${sign}${moneyLabel('PHP', netLabel)}) already included.`
+      `💵 ${cashMovementEntries.length} Forex Fund cash movement${cashMovementEntries.length > 1 ? 's' : ''} included (net ${total >= 0 ? '+' : '-'}${moneyLabel('PHP', Math.abs(total))}).`
+    );
+  }
+
+  if (
+    expenseEntries.length ||
+    cashMovementEntries.length
+  ) {
+    lines.push('');
+  }
+
+  if (
+    !stillOpen.length &&
+    !resolved.length
+  ) {
+    lines.push(
+      `✅ All good. ${tickets.length} transactions checked, everything matches.`
     );
 
+    return lines.join(
+      '\n'
+    );
+  }
+
+  if (
+    stillOpen.length
+  ) {
+    lines.push(
+      `*${stillOpen.length} discrepanc${stillOpen.length > 1 ? 'ies' : 'y'} this shift:*`
+    );
+
+    for (
+      const r of
+      stillOpen
+    ) {
+      if (
+        r.missingFromOpening &&
+        !r.missingFromClosing
+      ) {
+        lines.push(
+          `❗ ${r.ccy}: not in opening count; ${moneyLabel(r.ccy, r.actual)} at closing`
+        );
+
+      } else if (
+        r.missingFromClosing &&
+        !r.missingFromOpening
+      ) {
+        lines.push(
+          `❗ ${r.ccy}: expected ${moneyLabel(r.ccy, r.expected)}, but missing from closing count`
+        );
+
+      } else {
+        lines.push(
+          `❗ ${r.ccy}: ${r.diff < 0 ? 'short' : 'extra'} ${moneyLabel(r.ccy, Math.abs(r.diff))}`
+        );
+      }
+    }
 
     lines.push('');
   }
 
+  for (
+    const r of
+    resolved
+  ) {
+    lines.push(
+      `✅ ${r.ccy} resolved — corrected closing cash count now reconciles.`
+    );
+  }
 
   if (
-    cashMovementEntries.length >
-    0
+    resolved.length
   ) {
-    const netMovement =
+    lines.push('');
+  }
+
+  if (
+    stillOpen.length
+  ) {
+    const names =
+      [
+        firstName(
+          openingCount.teller
+        ),
+
+        firstName(
+          closingCount.teller
+        )
+      ].filter(
+        (
+          v,
+          i,
+          a
+        ) =>
+          a.indexOf(v) ===
+          i
+      );
+
+    lines.push(
+      `${names.map(n => '@' + n).join(' ')} — please check. Full math is in the thread below. 🙏`
+    );
+  }
+
+  return lines.join(
+    '\n'
+  );
+}
+
+function buildShiftMath({
+  branchConfig,
+  openingTotals,
+  closingTotals,
+  results,
+  tickets,
+  expenseEntries,
+  cashMovementEntries
+}) {
+  const mismatches =
+    results.filter(
+      r =>
+        !r.match
+    );
+
+  if (
+    !mismatches.length
+  ) {
+    return '';
+  }
+
+  const lines =
+    [
+      `*Full math — ${branchConfig.name}*`,
+      ''
+    ];
+
+  for (
+    let i = 0;
+    i < mismatches.length;
+    i++
+  ) {
+    const r =
+      mismatches[i];
+
+    const ccy =
+      r.ccy;
+
+    const emoji =
+      CCY_EMOJI[
+        ccy
+      ] ||
+      '•';
+
+    lines.push(
+      `${emoji} *${ccy}*`
+    );
+
+    lines.push(
+      `Opening: ${moneyLabel(ccy, openingTotals[ccy] || 0)}`
+    );
+
+    const relevant =
+      [];
+
+    for (
+      const ticket of
+      [...tickets].sort(
+        (
+          a,
+          b
+        ) =>
+          parseFloat(a.ts) -
+          parseFloat(b.ts)
+      )
+    ) {
+      const effect =
+        transactionEffectForCurrency(
+          ticket.parsed,
+          ccy
+        );
+
+      if (!effect) {
+        continue;
+      }
+
+      relevant.push(
+        effect
+      );
+
+      lines.push(
+        `${effect >= 0 ? '+' : '-'} ${rawTicketRef(ticket)}: ${moneyLabel(ccy, Math.abs(effect))}`
+      );
+    }
+
+    if (
+      ccy ===
+      'PHP'
+    ) {
+      for (
+        const e of
+        [...expenseEntries].sort(
+          (
+            a,
+            b
+          ) =>
+            parseFloat(a.ts) -
+            parseFloat(b.ts)
+        )
+      ) {
+        lines.push(
+          `${e.amount >= 0 ? '+' : '-'} ${expenseLabel(e.raw)}: ${moneyLabel('PHP', Math.abs(e.amount))}`
+        );
+      }
+
+      for (
+        const m of
+        [...cashMovementEntries].sort(
+          (
+            a,
+            b
+          ) =>
+            parseFloat(a.ts) -
+            parseFloat(b.ts)
+        )
+      ) {
+        lines.push(
+          `${m.amount >= 0 ? '+' : '-'} ${movementLabel(m.raw)}: ${moneyLabel('PHP', Math.abs(m.amount))}`
+        );
+      }
+    }
+
+    if (
+      !relevant.length &&
+      ccy !==
+        'PHP'
+    ) {
+      lines.push(
+        'No logged transaction movement for this currency.'
+      );
+    }
+
+    lines.push(
+      '────────────────────'
+    );
+
+    lines.push(
+      `Expected closing: *${moneyLabel(ccy, r.expected)}*`
+    );
+
+    lines.push(
+      `Actual closing:   *${moneyLabel(ccy, r.actual)}*`
+    );
+
+    lines.push(
+      `Difference:       *${r.diff < 0 ? 'SHORT' : 'EXTRA'} ${moneyLabel(ccy, Math.abs(r.diff))}*`
+    );
+
+    if (
+      i <
+      mismatches.length - 1
+    ) {
+      lines.push('');
+    }
+  }
+
+  lines.push('');
+
+  lines.push(
+    "Please check for any cash-in/cash-out, replenishment, transfer, expense, or transaction that was not posted before closing."
+  );
+
+  return lines.join(
+    '\n'
+  );
+}
+
+async function runShiftAudit(
+  closingEvent,
+  closingCount,
+  branchConfig,
+  { dryRun = false } = {}
+) {
+  const {
+    cashCountChannelId,
+    transactionsChannelId,
+    expensesChannelId
+  } = branchConfig;
+
+  try {
+    const openingCount =
+      await findOpeningForClosing(
+        cashCountChannelId,
+        closingEvent.ts,
+        closingCount
+      );
+
+    if (
+      !openingCount
+    ) {
+      const msg =
+        `⚠️ *Shift Audit — ${branchConfig.name}*\n` +
+        `No opening count found for this shift (${windowLabel(closingCount)}).`;
+
+      if (dryRun) {
+        return msg;
+      }
+
+      if (
+        shouldPostFailureNotice(
+          branchConfig.name,
+          'shift-no-opening'
+        )
+      ) {
+        await postMessage(
+          cashCountChannelId,
+          msg
+        );
+      }
+
+      return;
+    }
+
+    const openingBoundaryTs =
+      countTimestampToSlackTs(
+        openingCount.timestamp
+      ) ||
+      openingCount._ts;
+
+    const closingBoundaryTs =
+      countTimestampToSlackTs(
+        closingCount.timestamp
+      ) ||
+      closingEvent.ts;
+
+    const txMessages =
+      await history(
+        transactionsChannelId,
+        {
+          oldest:
+            openingBoundaryTs,
+
+          latest:
+            closingBoundaryTs,
+
+          limit:
+            500
+        }
+      );
+
+    const tickets =
+      txMessages
+        .filter(
+          m =>
+            m.text &&
+            TICKET_RE.test(
+              m.text
+            )
+        )
+        .map(
+          m => ({
+            parsed:
+              parseTransaction(
+                m.text
+              ),
+
+            raw:
+              m.text,
+
+            ts:
+              m.ts
+          })
+        )
+        .filter(
+          t =>
+            t.parsed
+        );
+
+    let expenseTotal =
+      0;
+
+    const expenseEntries =
+      [];
+
+    if (
+      expensesChannelId
+    ) {
+      const expenseMessages =
+        await history(
+          expensesChannelId,
+          {
+            oldest:
+              openingBoundaryTs,
+
+            latest:
+              closingBoundaryTs,
+
+            limit:
+              300
+          }
+        );
+
+      const shiftDate =
+        (
+          closingCount.timestamp ||
+          ''
+        )
+          .split(',')[0]
+          .trim();
+
+      for (
+        const m of
+        expenseMessages
+      ) {
+        const text =
+          m.text ||
+          '';
+
+        const entryDate =
+          statedExpenseDate(
+            text
+          );
+
+        if (
+          entryDate &&
+          shiftDate &&
+          entryDate !==
+            shiftDate
+        ) {
+          continue;
+        }
+
+        const parsed =
+          parseExpenseEntry(
+            text
+          );
+
+        if (!parsed) {
+          continue;
+        }
+
+        expenseTotal +=
+          parsed.amount;
+
+        expenseEntries.push({
+          ...parsed,
+
+          raw:
+            text,
+
+          ts:
+            m.ts
+        });
+      }
+    }
+
+    const generalMessages =
+      await history(
+        cashCountChannelId,
+        {
+          oldest:
+            openingBoundaryTs,
+
+          latest:
+            closingBoundaryTs,
+
+          limit:
+            500
+        }
+      );
+
+    const cashMovementEntries =
+      [];
+
+    for (
+      const m of
+      generalMessages
+    ) {
+      const parsed =
+        parseForexFundMovement(
+          m.text || ''
+        );
+
+      if (!parsed) {
+        continue;
+      }
+
+      cashMovementEntries.push({
+        ...parsed,
+
+        ts:
+          m.ts
+      });
+    }
+
+    const cashMovementTotal =
       cashMovementEntries.reduce(
         (
           sum,
@@ -2114,670 +1527,704 @@ function buildShiftAuditReport({
         0
       );
 
+    const openingTotals =
+      stripUntracked({
+        ...openingCount.totals,
+        ...openingCount.others
+      });
 
-    for (
-      const movement of
-      cashMovementEntries
-    ) {
-      lines.push(
-        `💵 Forex Fund ${movement.direction}: ${moneyLabel('PHP', Math.abs(movement.amount))} included.`
+    const closingTotals =
+      stripUntracked({
+        ...closingCount.totals,
+        ...closingCount.others
+      });
+
+    const phpAdjustment =
+      expenseTotal +
+      cashMovementTotal;
+
+    const adjustments =
+      phpAdjustment !==
+        0
+        ? {
+            PHP:
+              phpAdjustment
+          }
+        : {};
+
+    const results =
+      reconcile(
+        openingTotals,
+        closingTotals,
+
+        tickets.map(
+          t =>
+            t.parsed
+        ),
+
+        adjustments
       );
-    }
-
-
-    const sign =
-      netMovement >= 0
-        ? '+'
-        : '-';
-
-
-    lines.push(
-      `Net Forex Fund movement: ${sign}${moneyLabel('PHP', Math.abs(netMovement))}.`
-    );
-
-
-    lines.push('');
-  }
-
-
-  if (
-    stillOpen.length ===
-      0 &&
-    resolved.length ===
-      0
-  ) {
-    lines.push(
-      `✅ All good. ${tickets.length} transactions checked, everything matches.`
-    );
-
-
-    return lines.join(
-      '\n'
-    );
-  }
-
-
-  if (
-    stillOpen.length >
-    0
-  ) {
-    lines.push(
-      `*${stillOpen.length} discrepanc${stillOpen.length > 1 ? 'ies' : 'y'} this shift:*`
-    );
-
 
     for (
       const r of
-      stillOpen
+      results
     ) {
-      if (
-        r.missingFromOpening &&
-        !r.missingFromClosing
-      ) {
-        lines.push(
-          `❗ ${r.ccy}: not in the opening count, ${moneyLabel(r.ccy, r.actual)} at closing`
+      r.missingFromOpening =
+        !(
+          r.ccy in
+          openingTotals
         );
 
-      } else if (
-        r.missingFromClosing &&
-        !r.missingFromOpening
-      ) {
-        lines.push(
-          `❗ ${r.ccy}: ${moneyLabel(r.ccy, r.expected)} at opening, not in the closing count`
+      r.missingFromClosing =
+        !(
+          r.ccy in
+          closingTotals
         );
 
-      } else {
-        const short =
-          r.diff <
-          0;
-
-
-        lines.push(
-          `❗ ${r.ccy}: ${short ? 'short' : 'extra'} ${moneyLabel(r.ccy, Math.abs(r.diff))}`
-        );
-      }
-    }
-
-
-    lines.push('');
-  }
-
-
-  for (
-    const r of
-    resolved
-  ) {
-    lines.push(
-      `✅ ${r.ccy} resolved — corrected closing cash count now reconciles.`
-    );
-  }
-
-
-  if (
-    resolved.length
-  ) {
-    lines.push('');
-  }
-
-
-  if (
-    stillOpen.length >
-    0
-  ) {
-    const who =
-      [
-        openName,
-        closeName
-      ].filter(
-        (
-          v,
-          i,
-          a
-        ) =>
-          a.indexOf(v) ===
-          i
-      );
-
-
-    lines.push(
-      `${who.map(n => '@' + n).join(' ')} — can you explain these? See the thread below for the full math. 🙏`
-    );
-  }
-
-
-  return lines.join(
-    '\n'
-  );
-}
-
-
-/* ================================================================ */
-/* FULL COMPUTATION REPLIES                                         */
-/* ================================================================ */
-
-function sharedQuestions(
-  openFlags
-) {
-  const hasRealGap =
-    openFlags.some(
-      f =>
-        !f.missingFromOpening &&
-        !f.missingFromClosing
-    );
-
-
-  if (!hasRealGap) {
-    return [];
-  }
-
-
-  return [
-    '',
-    'Questions:',
-    "1. Did anyone drop off extra cash into the drawer that wasn't from a client transaction (e.g. replenishment, change fund, an owner's deposit)?",
-    '2. Could the closing count have included cash that actually belongs to a different bucket (like Hive, Receivables, or petty cash)?'
-  ];
-}
-
-
-function buildComputationReply(
-  branchConfig,
-  tickets
-) {
-  const openFlags =
-    getOpenShiftAuditFlags(
-      branchConfig.name
-    );
-
-
-  if (
-    openFlags.length ===
-    0
-  ) {
-    return 'Looks like everything already reconciled — nothing open to walk through right now.';
-  }
-
-
-  const lines = [];
-
-
-  lines.push(
-    `Here's the full math for ${branchConfig.name}:`
-  );
-
-
-  lines.push('');
-
-
-  for (
-    let i = 0;
-    i < openFlags.length;
-    i++
-  ) {
-    const f =
-      openFlags[i];
-
-
-    lines.push(
-      buildQuestionBlock(
-        f.ccy,
-        f.diff,
-        tickets,
-        f.openingAmount,
-        f.expected,
-        f.actual,
-        f.since,
-        f.missingFromOpening,
-        f.missingFromClosing
-      )
-    );
-
-
-    if (
-      i <
-      openFlags.length - 1
-    ) {
-      lines.push('');
-    }
-  }
-
-
-  lines.push(
-    ...sharedQuestions(
-      openFlags
-    )
-  );
-
-
-  lines.push('');
-
-
-  lines.push(
-    `Let us know here once it's sorted out. 🙏`
-  );
-
-
-  return lines.join(
-    '\n'
-  );
-}
-
-
-function buildHandoverComputationReply(
-  branchConfig,
-  gapTickets
-) {
-  const openFlags =
-    getOpenHandoverFlags(
-      branchConfig.name
-    );
-
-
-  if (
-    openFlags.length ===
-    0
-  ) {
-    return 'Looks like everything already reconciled — nothing open to walk through right now.';
-  }
-
-
-  const lines = [];
-
-
-  lines.push(
-    `Here's the full math for ${branchConfig.name}'s handover:`
-  );
-
-
-  lines.push('');
-
-
-  for (
-    let i = 0;
-    i < openFlags.length;
-    i++
-  ) {
-    const f =
-      openFlags[i];
-
-
-    lines.push(
-      buildQuestionBlock(
-        f.ccy,
-        f.diff,
-        gapTickets || [],
-        f.openingAmount,
-        f.expected,
-        f.actual,
-        f.since,
-        f.missingFromOpening,
-        f.missingFromClosing
-      )
-    );
-
-
-    if (
-      i <
-      openFlags.length - 1
-    ) {
-      lines.push('');
-    }
-  }
-
-
-  lines.push(
-    ...sharedQuestions(
-      openFlags
-    )
-  );
-
-
-  lines.push('');
-
-
-  lines.push(
-    `Let us know here once it's sorted out. 🙏`
-  );
-
-
-  return lines.join(
-    '\n'
-  );
-}
-
-
-/* ================================================================ */
-/* HANDOVER REPORT                                                   */
-/* ================================================================ */
-
-function buildQuestionReport({
-  branchConfig,
-  title,
-  dateLabel,
-  windowText,
-  openingTeller,
-  closingTeller,
-  txCount,
-  txLabel,
-  results,
-  dryRun = false
-}) {
-  const cycleId =
-    `${branchConfig.name}|handover|${dateLabel}|${windowText}`;
-
-
-  const {
-    stillOpen,
-    resolved
-  } =
-    annotateFlags(
-      HANDOVER_FLAGS,
-      branchConfig.name,
-      results,
-      dateLabel,
-      dryRun,
-      cycleId
-    );
-
-
-  const openShiftAuditFlags =
-    getOpenShiftAuditFlags(
-      branchConfig.name
-    );
-
-
-  const openName =
-    firstName(
-      openingTeller
-    );
-
-
-  const closeName =
-    firstName(
-      closingTeller
-    );
-
-
-  const lines = [];
-
-
-  if (dryRun) {
-    lines.push(
-      '_[DRY RUN — not posted to Slack]_'
-    );
-  }
-
-
-  lines.push(
-    `🔄 ${branchConfig.name} — ${dateLabel}, ${windowText}`
-  );
-
-
-  lines.push(
-    `${openName} → ${closeName}`
-  );
-
-
-  lines.push('');
-
-
-  const hasOvernightIssue =
-    stillOpen.length >
-    0;
-
-
-  const hasLeftoverQuestion =
-    openShiftAuditFlags.length >
-    0;
-
-
-  if (
-    !hasOvernightIssue
-  ) {
-    lines.push(
-      "✅ Overnight is fine — nothing moved that shouldn't have."
-    );
-
-  } else {
-    lines.push(
-      `⚠️ *${
-        stillOpen.length > 1
-          ? `${stillOpen.length} new things don't match:`
-          : `1 new thing doesn't match:`
-      }*`
-    );
-
-
-    for (
-      const r of
-      stillOpen
-    ) {
-      const short =
-        r.diff <
-        0;
-
-
-      const label =
-        moneyLabel(
-          r.ccy,
-          Math.abs(
-            r.diff
-          )
-        );
-
-
-      lines.push(
-        `❗ ${r.ccy}: ${short ? 'short' : 'extra'} ${label}`
-      );
-    }
-  }
-
-
-  for (
-    const r of
-    resolved
-  ) {
-    lines.push('');
-
-
-    lines.push(
-      `✅ ${r.ccy} handover now reconciles.`
-    );
-  }
-
-
-  if (
-    hasLeftoverQuestion
-  ) {
-    lines.push('');
-
-
-    lines.push(
-      `⚠️ *There${
-        openShiftAuditFlags.length > 1
-          ? ' are'
-          : "'s"
-      } still ${
-        openShiftAuditFlags.length > 1
-          ? 'open questions'
-          : 'an open question'
-      } from ${
-        openShiftAuditFlags.length > 1
-          ? 'earlier shifts'
-          : "yesterday's shift"
-      }:*`
-    );
-
-
-    lines.push('');
-
-
-    for (
-      const f of
-      openShiftAuditFlags
-    ) {
-      const emoji =
-        CCY_EMOJI[
-          f.ccy
+      r.openingAmount =
+        openingTotals[
+          r.ccy
         ] ||
-        '•';
+        0;
+    }
 
+    const dateLabel =
+      (
+        closingCount.timestamp ||
+        ''
+      )
+        .split(',')[0]
+        .trim();
 
-      const sinceLabel =
-        f.since
-          ? ` (from the ${f.since} shift)`
-          : '';
+    const cycleId =
+      `${branchConfig.name}|shift|${dateLabel}|${windowLabel(closingCount)}`;
 
+    const {
+      stillOpen,
+      resolved
+    } =
+      annotateFlags(
+        SHIFT_AUDIT_FLAGS,
+        branchConfig.name,
+        results,
+        dateLabel,
+        cycleId,
+        dryRun
+      );
 
-      if (
-        f.missingFromOpening &&
-        !f.missingFromClosing
-      ) {
-        lines.push(
-          `${emoji} ${f.ccy} was never confirmed at opening that day, but showed ${moneyLabel(f.ccy, f.diff >= 0 ? Math.abs(f.diff) : f.diff)} at closing${sinceLabel} — still waiting to hear if that was a reporting gap or a real change.`
-        );
+    const report =
+      buildShiftSummary({
+        branchConfig,
+        openingCount,
+        closingCount,
+        tickets,
+        expenseEntries,
+        cashMovementEntries,
+        stillOpen,
+        resolved,
+        dryRun
+      });
 
-      } else if (
-        f.missingFromClosing &&
-        !f.missingFromOpening
-      ) {
-        lines.push(
-          `${emoji} ${f.ccy} was never confirmed at closing that day${sinceLabel} — still waiting to hear if that was a reporting gap or a real change.`
-        );
+    const math =
+      buildShiftMath({
+        branchConfig,
+        openingTotals,
+        closingTotals,
+        results,
+        tickets,
+        expenseEntries,
+        cashMovementEntries
+      });
 
-      } else {
-        const short =
-          f.diff <
-          0;
+    if (dryRun) {
+      return math
+        ? `${report}\n\n_[THREAD PREVIEW]_\n${math}`
+        : report;
+    }
 
+    const posted =
+      await postMessage(
+        cashCountChannelId,
+        report
+      );
 
-        const label =
-          moneyLabel(
-            f.ccy,
-            Math.abs(
-              f.diff
-            )
-          );
+    if (
+      posted &&
+      posted.ts &&
+      math
+    ) {
+      await replyInThread(
+        cashCountChannelId,
+        posted.ts,
+        math
+      ).catch(
+        err =>
+          console.error(
+            'Failed to post computation reply:',
+            err
+          )
+      );
+    }
 
+  } catch (err) {
+    console.error(
+      'runShiftAudit error:',
+      err
+    );
 
-        const verb =
-          short
-            ? 'was short'
-            : 'had extra';
+    const msg =
+      `⚠️ Audit bot error for ${branchConfig.name}: ${err.message}\n\n` +
+      `${err.stack || ''}`;
 
+    if (dryRun) {
+      return msg;
+    }
 
-        lines.push(
-          `${emoji} The drawer ${verb} ${label} that was never explained${sinceLabel}.`
-        );
-      }
+    if (
+      shouldPostFailureNotice(
+        branchConfig.name,
+        'shift-error'
+      )
+    ) {
+      await postMessage(
+        branchConfig
+          .cashCountChannelId,
+
+        msg
+      ).catch(
+        () => {}
+      );
     }
   }
-
-
-  if (
-    !hasOvernightIssue &&
-    !hasLeftoverQuestion
-  ) {
-    return lines.join(
-      '\n'
-    );
-  }
-
-
-  lines.push('');
-
-
-  const who =
-    [
-      openName,
-      closeName
-    ].filter(
-      (
-        v,
-        i,
-        a
-      ) =>
-        a.indexOf(v) ===
-        i
-    );
-
-
-  const askVerb =
-    hasLeftoverQuestion &&
-    !hasOvernightIssue
-      ? 'this is still waiting on an answer'
-
-      : (
-          hasLeftoverQuestion
-            ? 'please check both'
-            : 'please check before trading'
-        );
-
-
-  lines.push(
-    `${who.map(n => '@' + n).join(' ')} — ${askVerb}. Reply here 🙏`
-  );
-
-
-  return lines.join(
-    '\n'
-  );
 }
 
+function buildHandoverMath({
+  branchConfig,
+  closingTotals,
+  openingTotals,
+  results,
+  gapTickets
+}) {
+  const mismatches =
+    results.filter(
+      r =>
+        !r.match
+    );
 
-/* ================================================================ */
-/* MONEY FORMATTING                                                  */
-/* ================================================================ */
+  if (
+    !mismatches.length
+  ) {
+    return '';
+  }
 
-const CCY_SYMBOL = {
-  USD: '$',
-  GBP: '£',
-  EUR: '€',
-  AUD: 'A$',
-  CAD: 'C$',
-  SGD: 'S$',
-  HKD: 'HK$',
-  PHP: '₱',
-  Hive: '₱',
-  Opex: '₱'
-};
-
-
-function moneyLabel(
-  ccy,
-  amount
-) {
-  const symbol =
-    CCY_SYMBOL[
-      ccy
+  const lines =
+    [
+      `*Full handover math — ${branchConfig.name}*`,
+      ''
     ];
 
+  for (
+    let i = 0;
+    i < mismatches.length;
+    i++
+  ) {
+    const r =
+      mismatches[i];
 
-  return symbol
-    ? `${symbol}${fmt(amount)}`
-    : `${fmt(amount)} ${ccy}`;
-}
+    const ccy =
+      r.ccy;
 
+    lines.push(
+      `*${ccy}*`
+    );
 
-function fmt(n) {
-  return (
-    n || 0
-  ).toLocaleString(
-    'en-US',
-    {
-      minimumFractionDigits:
-        2,
+    lines.push(
+      `Previous closing: ${moneyLabel(ccy, closingTotals[ccy] || 0)}`
+    );
 
-      maximumFractionDigits:
-        2
+    for (
+      const t of
+      gapTickets
+    ) {
+      const effect =
+        transactionEffectForCurrency(
+          t,
+          ccy
+        );
+
+      if (!effect) {
+        continue;
+      }
+
+      lines.push(
+        `${effect >= 0 ? '+' : '-'} Transaction ${t.ref || ''}: ${moneyLabel(ccy, Math.abs(effect))}`
+      );
     }
+
+    lines.push(
+      '────────────────────'
+    );
+
+    lines.push(
+      `Expected opening: *${moneyLabel(ccy, r.expected)}*`
+    );
+
+    lines.push(
+      `Actual opening:   *${moneyLabel(ccy, r.actual)}*`
+    );
+
+    lines.push(
+      `Difference:       *${r.diff < 0 ? 'SHORT' : 'EXTRA'} ${moneyLabel(ccy, Math.abs(r.diff))}*`
+    );
+
+    if (
+      i <
+      mismatches.length - 1
+    ) {
+      lines.push('');
+    }
+  }
+
+  return lines.join(
+    '\n'
   );
 }
 
+async function runCloseVsOpenCheck(
+  openingEvent,
+  openingCount,
+  branchConfig,
+  { dryRun = false } = {}
+) {
+  const {
+    cashCountChannelId,
+    transactionsChannelId
+  } = branchConfig;
 
-/* ================================================================ */
-/* EXPORTS                                                          */
-/* ================================================================ */
+  try {
+    const closingCount =
+      await findPriorScheduledClosing(
+        cashCountChannelId,
+        openingEvent.ts,
+        openingCount
+      );
+
+    if (
+      !closingCount
+    ) {
+      const msg =
+        `⚠️ *Handover Check — ${branchConfig.name}*\n` +
+        `No prior closing count found to compare against.`;
+
+      if (dryRun) {
+        return msg;
+      }
+
+      if (
+        shouldPostFailureNotice(
+          branchConfig.name,
+          'handover-no-closing'
+        )
+      ) {
+        await postMessage(
+          cashCountChannelId,
+          msg
+        );
+      }
+
+      return;
+    }
+
+    const closingBoundaryTs =
+      countTimestampToSlackTs(
+        closingCount.timestamp
+      ) ||
+      closingCount._ts;
+
+    const openingBoundaryTs =
+      countTimestampToSlackTs(
+        openingCount.timestamp
+      ) ||
+      openingEvent.ts;
+
+    const gapMessages =
+      await history(
+        transactionsChannelId,
+        {
+          oldest:
+            closingBoundaryTs,
+
+          latest:
+            openingBoundaryTs,
+
+          limit:
+            200
+        }
+      );
+
+    const gapTickets =
+      gapMessages
+        .filter(
+          m =>
+            m.text &&
+            TICKET_RE.test(
+              m.text
+            )
+        )
+        .map(
+          m =>
+            parseTransaction(
+              m.text
+            )
+        )
+        .filter(Boolean);
+
+    const closingTotals =
+      stripUntracked({
+        ...closingCount.totals,
+        ...closingCount.others
+      });
+
+    const openingTotals =
+      stripUntracked({
+        ...openingCount.totals,
+        ...openingCount.others
+      });
+
+    const allCcy =
+      new Set([
+        ...Object.keys(
+          closingTotals
+        ),
+
+        ...Object.keys(
+          openingTotals
+        )
+      ]);
+
+    for (
+      const t of
+      gapTickets
+    ) {
+      for (
+        const mv of
+        t.movements ||
+        []
+      ) {
+        allCcy.add(
+          mv.ccy
+        );
+      }
+
+      if (
+        t.phpAmount !=
+        null
+      ) {
+        allCcy.add(
+          'PHP'
+        );
+      }
+    }
+
+    const results =
+      [];
+
+    for (
+      const ccy of
+      allCcy
+    ) {
+      const closeVal =
+        closingTotals[
+          ccy
+        ] ||
+        0;
+
+      const openVal =
+        openingTotals[
+          ccy
+        ] ||
+        0;
+
+      const gapMovement =
+        gapTickets.reduce(
+          (
+            sum,
+            tx
+          ) =>
+            sum +
+            transactionEffectForCurrency(
+              tx,
+              ccy
+            ),
+
+          0
+        );
+
+      const expected =
+        closeVal +
+        gapMovement;
+
+      const diff =
+        Math.round(
+          (
+            openVal -
+            expected
+          ) *
+          100
+        ) /
+        100;
+
+      const tolerance =
+        ccy ===
+          'PHP'
+          ? 1
+          : 0.01;
+
+      results.push({
+        ccy,
+
+        expected:
+          Math.round(
+            expected *
+            100
+          ) /
+          100,
+
+        actual:
+          Math.round(
+            openVal *
+            100
+          ) /
+          100,
+
+        diff,
+
+        match:
+          Math.abs(
+            diff
+          ) <=
+          tolerance,
+
+        missingFromOpening:
+          !(
+            ccy in
+            closingTotals
+          ),
+
+        missingFromClosing:
+          !(
+            ccy in
+            openingTotals
+          ),
+
+        openingAmount:
+          closeVal
+      });
+    }
+
+    results.sort(
+      (
+        a,
+        b
+      ) =>
+        a.ccy.localeCompare(
+          b.ccy
+        )
+    );
+
+    const dateLabel =
+      (
+        openingCount.timestamp ||
+        ''
+      )
+        .split(',')[0]
+        .trim();
+
+    const closeTime =
+      (
+        closingCount.timestamp ||
+        ''
+      )
+        .split(',')[1]
+        ?.trim() ||
+      '?';
+
+    const openTime =
+      (
+        openingCount.timestamp ||
+        ''
+      )
+        .split(',')[1]
+        ?.trim() ||
+      '?';
+
+    const cycleId =
+      `${branchConfig.name}|handover|${closingCount.timestamp}|${openingCount.timestamp}`;
+
+    const {
+      stillOpen,
+      resolved
+    } =
+      annotateFlags(
+        HANDOVER_FLAGS,
+        branchConfig.name,
+        results,
+        dateLabel,
+        cycleId,
+        dryRun
+      );
+
+    const lines =
+      [];
+
+    if (dryRun) {
+      lines.push(
+        '_[DRY RUN — not posted to Slack]_'
+      );
+    }
+
+    lines.push(
+      `🔄 ${branchConfig.name} — ${dateLabel}, Close ${closeTime} → Open ${openTime}`
+    );
+
+    lines.push(
+      `${firstName(closingCount.teller)} → ${firstName(openingCount.teller)}`
+    );
+
+    lines.push('');
+
+    const oldShiftFlags =
+      getOpenShiftFlags(
+        branchConfig.name
+      );
+
+    if (
+      !stillOpen.length
+    ) {
+      lines.push(
+        "✅ Overnight is fine — nothing moved that shouldn't have."
+      );
+
+    } else {
+      lines.push(
+        `⚠️ *${stillOpen.length} handover discrepanc${stillOpen.length > 1 ? 'ies' : 'y'}:*`
+      );
+
+      for (
+        const r of
+        stillOpen
+      ) {
+        lines.push(
+          `❗ ${r.ccy}: ${r.diff < 0 ? 'short' : 'extra'} ${moneyLabel(r.ccy, Math.abs(r.diff))}`
+        );
+      }
+    }
+
+    for (
+      const r of
+      resolved
+    ) {
+      lines.push(
+        `✅ ${r.ccy} handover now reconciles.`
+      );
+    }
+
+    if (
+      oldShiftFlags.length
+    ) {
+      lines.push('');
+
+      lines.push(
+        `⚠️ There ${oldShiftFlags.length > 1 ? 'are' : 'is'} still ${oldShiftFlags.length} unresolved shift-audit question${oldShiftFlags.length > 1 ? 's' : ''} from earlier.`
+      );
+    }
+
+    if (
+      stillOpen.length ||
+      oldShiftFlags.length
+    ) {
+      lines.push('');
+
+      lines.push(
+        `@${firstName(openingCount.teller)} — please check before trading. 🙏`
+      );
+    }
+
+    const report =
+      lines.join(
+        '\n'
+      );
+
+    const math =
+      buildHandoverMath({
+        branchConfig,
+        closingTotals,
+        openingTotals,
+        results,
+        gapTickets
+      });
+
+    if (dryRun) {
+      return math
+        ? `${report}\n\n_[THREAD PREVIEW]_\n${math}`
+        : report;
+    }
+
+    const posted =
+      await postMessage(
+        cashCountChannelId,
+        report
+      );
+
+    if (
+      posted &&
+      posted.ts &&
+      math
+    ) {
+      await replyInThread(
+        cashCountChannelId,
+        posted.ts,
+        math
+      ).catch(
+        err =>
+          console.error(
+            'Failed to post handover computation reply:',
+            err
+          )
+      );
+    }
+
+  } catch (err) {
+    console.error(
+      'runCloseVsOpenCheck error:',
+      err
+    );
+
+    const msg =
+      `⚠️ Audit bot error (handover) for ${branchConfig.name}: ${err.message}\n\n` +
+      `${err.stack || ''}`;
+
+    if (dryRun) {
+      return msg;
+    }
+
+    if (
+      shouldPostFailureNotice(
+        branchConfig.name,
+        'handover-error'
+      )
+    ) {
+      await postMessage(
+        branchConfig
+          .cashCountChannelId,
+
+        msg
+      ).catch(
+        () => {}
+      );
+    }
+  }
+}
 
 module.exports = {
   runShiftAudit,
