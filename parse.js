@@ -422,7 +422,7 @@ function parseExpenseEntry(text) {
   // The FINAL number is the stated total.
   const numberMatches = [
     ...amountLine.matchAll(
-      /([\d,]+(?:\.\d+)?)\s*(k)?\b/gi
+      /([\d,]+(?:\.\d{1,2})?)\s*(k)?(?=\s|$|[*_])/gi
     )
   ];
 
