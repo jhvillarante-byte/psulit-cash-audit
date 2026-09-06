@@ -122,20 +122,40 @@ async function runShiftAudit(
         limit: 200
       });
 
-      for (const m of expenseMessages) {
-        const parsed = parseExpenseEntry(m.text || '');
+      const shiftDate =
+  (closingCount.timestamp || '')
+    .split(',')[0]
+    .trim();
 
-        if (parsed) {
-          expenseTotal += parsed.amount;
+for (const m of expenseMessages) {
+  const text = m.text || '';
 
-          expenseEntries.push({
-            ...parsed,
-            raw: m.text,
-            ts: m.ts
-          });
-        }
-      }
-    }
+  const entryDate =
+    statedExpenseDate(text);
+
+  // If the expense explicitly states another date,
+  // do not count it in this shift.
+  if (
+    entryDate &&
+    shiftDate &&
+    entryDate !== shiftDate
+  ) {
+    continue;
+  }
+
+  const parsed =
+    parseExpenseEntry(text);
+
+  if (parsed) {
+    expenseTotal += parsed.amount;
+
+    expenseEntries.push({
+      ...parsed,
+      raw: text,
+      ts: m.ts
+    });
+  }
+}
 
     // Include documented cash movement posted in the branch/general channel.
     const generalMessages = await history(cashCountChannelId, {
@@ -541,7 +561,54 @@ async function runCloseVsOpenCheck(
 /* ------------------------------------------------------------------ */
 /* HELPERS                                                             */
 /* ------------------------------------------------------------------ */
+function statedExpenseDate(text) {
+  if (!text) return null;
 
+  const monthMap = {
+    jan: 1,
+    january: 1,
+    feb: 2,
+    february: 2,
+    mar: 3,
+    march: 3,
+    apr: 4,
+    april: 4,
+    may: 5,
+    jun: 6,
+    june: 6,
+    jul: 7,
+    july: 7,
+    aug: 8,
+    august: 8,
+    sep: 9,
+    sept: 9,
+    september: 9,
+    oct: 10,
+    october: 10,
+    nov: 11,
+    november: 11,
+    dec: 12,
+    december: 12
+  };
+
+  const match = String(text).match(
+    /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})\s*,?\s*(20\d{2})\b/i
+  );
+
+  if (!match) return null;
+
+  const month = monthMap[match[1].toLowerCase()];
+  const day = Number(match[2]);
+  const year = Number(match[3]);
+
+  if (!month || !day || !year) return null;
+
+  return [
+    String(month).padStart(2, '0'),
+    String(day).padStart(2, '0'),
+    String(year)
+  ].join('/');
+}
 function stripUntracked(totals) {
   const copy = { ...totals };
 
