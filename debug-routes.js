@@ -9,13 +9,17 @@
  * Raw cash-count messages:
  *   /debug/raw?branch=Alphaland&limit=3
  *
- * EXPENSE DEBUG:
+ * Expense debug:
  *   /debug/expenses?branch=Alphaland
+ *
+ * Transaction debug:
+ *   /debug/transactions?branch=Alphaland
  */
 
 const {
   parseCashCount,
-  parseExpenseEntry
+  parseExpenseEntry,
+  parseTransaction
 } = require('./parse');
 
 const { history } = require('./slack');
@@ -386,10 +390,6 @@ function registerDebugRoutes(app, BRANCHES) {
 
   /*
    * EXPENSE DEBUG
-   *
-   * Shows every message between the opening
-   * and closing that parseExpenseEntry()
-   * currently considers an expense or replenishment.
    */
   app.get(
     '/debug/expenses',
@@ -412,9 +412,7 @@ function registerDebugRoutes(app, BRANCHES) {
             );
         }
 
-        if (
-          !branchConfig.expensesChannelId
-        ) {
+        if (!branchConfig.expensesChannelId) {
           return res
             .status(400)
             .send(
@@ -445,7 +443,7 @@ function registerDebugRoutes(app, BRANCHES) {
           return res
             .status(404)
             .send(
-              `No opening cash count found before closing.`
+              'No opening cash count found before closing.'
             );
         }
 
@@ -492,9 +490,7 @@ function registerDebugRoutes(app, BRANCHES) {
         let detectedCount = 0;
         let total = 0;
 
-        for (
-          const msg of expenseMessages
-        ) {
+        for (const msg of expenseMessages) {
           const text =
             msg.text || '';
 
@@ -572,6 +568,277 @@ function registerDebugRoutes(app, BRANCHES) {
       } catch (err) {
         console.error(
           'debug/expenses error:',
+          err
+        );
+
+        res
+          .status(500)
+          .type('text/plain')
+          .send(
+            `Error: ${err.message}\n\n${err.stack || ''}`
+          );
+      }
+    }
+  );
+
+  /*
+   * TRANSACTION DEBUG
+   *
+   * Shows every transaction message between
+   * opening and closing and exactly what
+   * parseTransaction() sees.
+   */
+  app.get(
+    '/debug/transactions',
+    async (req, res) => {
+      try {
+        const branchConfig =
+          byName.get(
+            (
+              req.query.branch || ''
+            ).toLowerCase()
+          );
+
+        if (!branchConfig) {
+          return res
+            .status(400)
+            .send(
+              `Unknown branch. Known: ${[
+                ...byName.keys()
+              ].join(', ')}`
+            );
+        }
+
+        if (!branchConfig.transactionsChannelId) {
+          return res
+            .status(400)
+            .send(
+              `${branchConfig.name} has no transaction channel configured.`
+            );
+        }
+
+        const closing =
+          await findLatestClosing(
+            branchConfig
+          );
+
+        if (!closing) {
+          return res
+            .status(404)
+            .send(
+              `No closing cash count found for ${branchConfig.name}.`
+            );
+        }
+
+        const opening =
+          await findOpeningBefore(
+            branchConfig,
+            closing.msg.ts
+          );
+
+        if (!opening) {
+          return res
+            .status(404)
+            .send(
+              'No opening cash count found before closing.'
+            );
+        }
+
+        const txMessages =
+          await history(
+            branchConfig.transactionsChannelId,
+            {
+              oldest:
+                opening.msg.ts,
+
+              latest:
+                closing.msg.ts,
+
+              limit: 500
+            }
+          );
+
+        const lines = [];
+
+        lines.push(
+          `TRANSACTION DEBUG — ${branchConfig.name}`
+        );
+
+        lines.push(
+          `Opening: ${opening.parsed.timestamp}`
+        );
+
+        lines.push(
+          `Closing: ${closing.parsed.timestamp}`
+        );
+
+        lines.push(
+          `Transaction channel: ${branchConfig.transactionsChannelId}`
+        );
+
+        lines.push(
+          `Messages fetched: ${txMessages.length}`
+        );
+
+        lines.push(
+          '='.repeat(90)
+        );
+
+        let detectedCount = 0;
+        let phpNet = 0;
+
+        for (const msg of txMessages) {
+          const text =
+            msg.text || '';
+
+          const parsed =
+            parseTransaction(
+              text
+            );
+
+          if (!parsed) {
+            continue;
+          }
+
+          detectedCount++;
+
+          let phpEffect = 0;
+
+          if (
+            parsed.phpAmount != null &&
+            parsed.movements &&
+            parsed.movements.length
+          ) {
+            const action =
+              parsed.movements[0].action;
+
+            phpEffect =
+              action === 'BUY'
+                ? -parsed.phpAmount
+                : parsed.phpAmount;
+
+            phpNet +=
+              phpEffect;
+          }
+
+          lines.push('');
+
+          lines.push(
+            `TRANSACTION #${detectedCount}`
+          );
+
+          lines.push(
+            `Slack ts: ${msg.ts}`
+          );
+
+          lines.push(
+            `Parsed PHP amount: ${
+              parsed.phpAmount == null
+                ? 'NONE'
+                : '₱' +
+                  Number(
+                    parsed.phpAmount
+                  ).toLocaleString(
+                    'en-US',
+                    {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2
+                    }
+                  )
+            }`
+          );
+
+          lines.push(
+            `PHP effect: ${
+              phpEffect >= 0
+                ? '+'
+                : '-'
+            }₱${Math.abs(
+              phpEffect
+            ).toLocaleString(
+              'en-US',
+              {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2
+              }
+            )}`
+          );
+
+          lines.push(
+            'Parsed movements:'
+          );
+
+          if (
+            parsed.movements &&
+            parsed.movements.length
+          ) {
+            for (
+              const mv of
+              parsed.movements
+            ) {
+              lines.push(
+                `  ${mv.action} ${Number(
+                  mv.fcyAmount
+                ).toLocaleString(
+                  'en-US',
+                  {
+                    maximumFractionDigits: 2
+                  }
+                )} ${mv.ccy}`
+              );
+            }
+          } else {
+            lines.push(
+              '  NONE'
+            );
+          }
+
+          lines.push(
+            'RAW MESSAGE:'
+          );
+
+          lines.push(text);
+
+          lines.push(
+            '-'.repeat(90)
+          );
+        }
+
+        lines.push('');
+
+        lines.push(
+          '='.repeat(90)
+        );
+
+        lines.push(
+          `Detected transactions: ${detectedCount}`
+        );
+
+        lines.push(
+          `NET PHP EFFECT: ${
+            phpNet >= 0
+              ? '+'
+              : '-'
+          }₱${Math.abs(
+            phpNet
+          ).toLocaleString(
+            'en-US',
+            {
+              minimumFractionDigits: 2,
+              maximumFractionDigits: 2
+            }
+          )}`
+        );
+
+        res
+          .type('text/plain')
+          .send(
+            lines.join('\n')
+          );
+
+      } catch (err) {
+        console.error(
+          'debug/transactions error:',
           err
         );
 
