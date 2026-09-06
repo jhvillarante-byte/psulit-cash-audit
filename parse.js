@@ -1,3 +1,4 @@
+
 // Parses the two message formats we get from Slack:
 //  1. "PSULIT CASH COUNT REPORT" - posted by the Psulit Cash Count bot
 //  2. Transaction tickets (VN #####, AR #####, ARN #####) - posted by tellers
@@ -382,66 +383,51 @@ function parseHiveEntry(text) {
 /**
  * Parses expense/replenishment Slack entries.
  *
- * IMPORTANT:
- * We use the FINAL amount written on the Amount line.
+ * Supports old manual messages and new Expense Report messages.
  *
- * Examples:
+ * The final number on the Amount line is the stated total.
  *
- * Amount: Php 68 + 108 = Php 176
- * -> 176
+ * Amount: Php 68 + 108 = Php 176 -> -176
+ * Amount: ₱116.00 -> -116
+ * Amount: Php 2,199 + 12 biller fee = Php 2,211 -> -2211
+ * Replenishment amount: 100k -> +100000
  *
- * Amount: Php 2,199 + 12 biller fee = Php 2,211
- * -> 2,211
- *
- * Amount: Php 830
- * -> 830
- *
- * Replenishment / Top-up = money INTO forex cash
+ * Replenishment / Top-up = money IN
  * Normal expense = money OUT
  */
 function parseExpenseEntry(text) {
   if (!text) return null;
 
-  // Only inspect the Amount line.
-  // This prevents dates, reference numbers, approvals,
-  // etc. from being mistaken for the cash amount.
+  // Read only the Amount line, not dates, IDs or approvals.
   const amountLineMatch = String(text).match(
-    /amount\s*:?\s*([^\n\r]+)/i
+    /(?:^|\n)\s*\*?\s*amount\s*:?\s*([^\n\r]+)/i
   );
 
-  if (!amountLineMatch) {
-    return null;
-  }
+  if (!amountLineMatch) return null;
 
   const amountLine = amountLineMatch[1]
     .replace(/\*/g, ' ')
     .replace(/\u00A0/g, ' ')
     .trim();
 
-  // Find every number on the Amount line.
-  // The FINAL number is the stated total.
+  // Accept peso symbols, PHP labels, centavos and shorthand.
+  // The final number on the line is the stated total.
   const numberMatches = [
     ...amountLine.matchAll(
-      /([\d,]+(?:\.\d{1,2})?)\s*(k)?(?=\s|$|[*_])/gi
+      /(?:₱|PHP|PHP\.|P\s*)?\s*([\d,]+(?:\.\d{1,2})?)\s*(k)?(?=\s|$|[*_,.)])/gi
     )
   ];
 
-  if (numberMatches.length === 0) {
-    return null;
-  }
+  if (numberMatches.length === 0) return null;
 
-  const last =
-    numberMatches[numberMatches.length - 1];
+  const last = numberMatches[numberMatches.length - 1];
 
   let amount = parseFloat(
     last[1].replace(/,/g, '')
   );
 
-  if (!Number.isFinite(amount)) {
-    return null;
-  }
+  if (!Number.isFinite(amount)) return null;
 
-  // Supports shorthand such as 100k.
   if (last[2]) {
     amount *= 1000;
   }
@@ -450,9 +436,7 @@ function parseExpenseEntry(text) {
     /top[\s-]?up|replenish/i.test(text);
 
   return {
-    amount: isTopUp
-      ? amount
-      : -amount
+    amount: isTopUp ? amount : -amount
   };
 }
 
