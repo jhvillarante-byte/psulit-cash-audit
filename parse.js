@@ -1,179 +1,269 @@
 // Parses the two message formats we get from Slack:
 //  1. "PSULIT CASH COUNT REPORT" - posted by the Psulit Cash Count bot
-//  2. Transaction tickets (VN ##### / AR #####) - posted by tellers
-//
-// NOTE on field labels: only a handful of lines in the real messages are
-// wrapped in literal *asterisks* (the title, "Grand Total", "Submitted &
-// Locked") — those come through Slack's rich_text bold styling as plain
-// unmarked text in msg.text. Field labels like "Branch:", "Shift:",
-// "Teller:", "Timestamp:" are NOT asterisk-wrapped in the real messages, so
-// the extraction regexes below must not require asterisks around them.
+//  2. Transaction tickets (VN #####, AR #####, ARN #####) - posted by tellers
 
 const CCY_LINE = /:flag-[a-z]+:\s*\*([A-Z]{3})[^*]*\*|:([a-z]{2}):\s*\*([A-Z]{3})[^*]*\*/g;
 const SUBTOTAL_LINE = /\*Subtotal:\s*([^\d\-.,]*)\s*([\d,]+\.?\d*)\*/;
 
-// Currency symbol -> ISO code map (for parsing "Subtotal" lines, which show symbol not code)
+// Currency symbol -> ISO code map
 const SYMBOL_TO_CCY = {
-  '₱': 'PHP', 'P': 'PHP',
+  '₱': 'PHP',
+  'P': 'PHP',
   '$': 'USD',
   'S$': 'SGD',
   'HK$': 'HKD',
-  '¥': 'CNY', // ambiguous with JPY, disambiguated by section header below
+  '¥': 'CNY',
   '£': 'GBP',
   '€': 'EUR'
 };
 
 /**
- * Parses a "PSULIT CASH COUNT REPORT" message into structured totals.
- * Returns { branch, shift, teller, timestamp, refCode, totals: { USD: 123.45, PHP: ..., ... },
- *           others: { Hive: ..., Opex: ... }, denominations: { PHP: [{value,count}], Hive: [...], ... } }
+ * Parses a PSULIT CASH COUNT REPORT.
  */
 function parseCashCount(text) {
   if (!text || !text.includes('PSULIT CASH COUNT REPORT')) return null;
 
-  // Field labels are plain text in the real messages (no surrounding
-  // asterisks) — only match on the label itself, not *Label:*.
   const branch = matchOne(text, /Branch:\s*(.+)/);
   const rawShift = matchOne(text, /Shift:\s*(.+)/);
-  // Newer app versions append an explicit phase, e.g. "Morning (Opening)" or
-  // "Mid-Shift (Closing)". Split that out so shift stays just "Morning"/"Mid-Shift"
-  // and phase captures "Opening"/"Closing" when the app provides it (older
-  // messages, and Alphaland pre-refresh, have no phase — phase stays null).
+
   let shift = rawShift;
   let phase = null;
-  const phaseMatch = (rawShift || '').match(/^(.+?)\s*\((Opening|Closing)\)\s*$/i);
+
+  const phaseMatch = (rawShift || '').match(
+    /^(.+?)\s*\((Opening|Closing)\)\s*$/i
+  );
+
   if (phaseMatch) {
     shift = phaseMatch[1].trim();
     phase = phaseMatch[2];
   }
+
   const teller = matchOne(text, /Teller:\s*(.+)/);
   const timestamp = matchOne(text, /Timestamp:\s*(.+)/);
   const refCode = matchOne(text, /Ref Code:\s*(.+)/);
 
-  // Split into FOREX section and OTHERS section
   const forexSection = text.split('*OTHERS*')[0];
   const othersSection = text.split('*OTHERS*')[1] || '';
 
   const forex = extractCurrencyBlocks(forexSection);
   const others = extractNamedBlocks(othersSection);
 
-  // Newer flat-line app format doesn't use an "*OTHERS*" section header at
-  // all — Hive/Opex/JuanPay/Scratch/Receivables lines just appear inline in
-  // the main body as ":emoji: Name: ₱amount". Pick up anything not already
-  // captured as a currency code, so this doesn't clobber the older block
-  // format (which already found real values via extractNamedBlocks above).
+  // Newer cash-count messages put Hive/Opex/etc. directly
+  // in the report instead of inside an OTHERS section.
   const flatOthers = extractFlatNamedAmounts(text);
+
   for (const [name, amount] of Object.entries(flatOthers)) {
-    if (!(name in others.totals)) others.totals[name] = amount;
+    if (!(name in others.totals)) {
+      others.totals[name] = amount;
+    }
   }
 
   return {
-    branch, shift, phase, teller, timestamp, refCode,
+    branch,
+    shift,
+    phase,
+    teller,
+    timestamp,
+    refCode,
     totals: forex.totals,
     others: others.totals,
-    denominations: { ...forex.denominations, ...others.denominations }
+    denominations: {
+      ...forex.denominations,
+      ...others.denominations
+    }
   };
 }
 
-// Known non-currency labels the app posts as flat ":emoji: Label: ₱amount"
-// lines. Kept as an explicit list (rather than "anything not a 3-letter
-// currency code") so this can't accidentally swallow a real currency line
-// or the Grand Total/Ref Code/Timestamp lines.
-const FLAT_OTHER_LABELS = ['Hive', 'Opex', 'JuanPay', 'Scratch', 'Receivables (PHP)', 'Receivables (USD)'];
+const FLAT_OTHER_LABELS = [
+  'Hive',
+  'Opex',
+  'JuanPay',
+  'Scratch',
+  'Receivables (PHP)',
+  'Receivables (USD)'
+];
 
 function extractFlatNamedAmounts(text) {
   const totals = {};
+
   for (const label of FLAT_OTHER_LABELS) {
-    const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const re = new RegExp(`${escaped}:\\s*(?:₱|\\$|€|£|¥|HK\\$|S\\$|A\\$|C\\$|SR|฿|₩)?\\s*([\\d,]+\\.?\\d*)`, 'i');
+    const escaped = label.replace(
+      /[.*+?^${}()|[\]\\]/g,
+      '\\$&'
+    );
+
+    const re = new RegExp(
+      `${escaped}:\\s*(?:₱|\\$|€|£|¥|HK\\$|S\\$|A\\$|C\\$|SR|฿|₩)?\\s*([\\d,]+\\.?\\d*)`,
+      'i'
+    );
+
     const m = text.match(re);
+
     if (m) {
-      const amount = parseFloat(m[1].replace(/,/g, ''));
+      const amount = parseFloat(
+        m[1].replace(/,/g, '')
+      );
+
       if (!isNaN(amount)) {
-        // Normalize "Receivables (PHP)" / "Receivables (USD)" down to one
-        // "Receivables" key isn't done here — kept distinct since they're
-        // different currencies; store under the exact label seen.
         totals[label] = amount;
       }
     }
   }
+
   return totals;
 }
 
-// Parses individual denomination lines within a block, e.g. "₱1,000 × 175 = ₱175,000"
-// or "25¢ × 2 = ₱0.50". Returns [{ value, count }], value in base currency units
-// (centavo lines like "25¢" become 0.25).
+/**
+ * Parses denomination lines such as:
+ * ₱1,000 × 175 = ₱175,000
+ * 25¢ × 2 = ₱0.50
+ */
 function parseDenominationLines(block) {
   const lines = [];
-  const lineRegex = /(?:₱|\$|€|£|¥|HK\$|S\$)?\s*([\d,]+\.?\d*)\s*(¢)?\s*[×x]\s*(\d+)\s*=/g;
+
+  const lineRegex =
+    /(?:₱|\$|€|£|¥|HK\$|S\$)?\s*([\d,]+\.?\d*)\s*(¢)?\s*[×x]\s*(\d+)\s*=/g;
+
   let m;
+
   while ((m = lineRegex.exec(block)) !== null) {
-    let value = parseFloat(m[1].replace(/,/g, ''));
-    if (m[2]) value = value / 100; // centavo denominations (25¢ -> 0.25)
-    lines.push({ value, count: parseInt(m[3], 10) });
+    let value = parseFloat(
+      m[1].replace(/,/g, '')
+    );
+
+    if (m[2]) {
+      value = value / 100;
+    }
+
+    lines.push({
+      value,
+      count: parseInt(m[3], 10)
+    });
   }
+
   return lines;
 }
 
-// Extracts currency name headers (e.g. ":flag-ph: *PHP — Philippine Peso*") and the Subtotal that follows each
+/**
+ * Extract currency blocks from cash-count reports.
+ */
 function extractCurrencyBlocks(section) {
   const totals = {};
   const denominations = {};
+
   const headerRegex = /\*([A-Z]{3})\s*—[^*]*\*/g;
+
   let match;
   const headers = [];
+
   while ((match = headerRegex.exec(section)) !== null) {
-    headers.push({ ccy: match[1], index: match.index });
+    headers.push({
+      ccy: match[1],
+      index: match.index
+    });
   }
+
   for (let i = 0; i < headers.length; i++) {
     const start = headers[i].index;
-    const end = i + 1 < headers.length ? headers[i + 1].index : section.length;
+
+    const end =
+      i + 1 < headers.length
+        ? headers[i + 1].index
+        : section.length;
+
     const block = section.slice(start, end);
-    const subtotalMatch = block.match(/\*Subtotal:\s*[^\d]*([\d,]+\.?\d*)\*/);
+
+    const subtotalMatch = block.match(
+      /\*Subtotal:\s*[^\d]*([\d,]+\.?\d*)\*/
+    );
+
     if (subtotalMatch) {
-      totals[headers[i].ccy] = parseFloat(subtotalMatch[1].replace(/,/g, ''));
+      totals[headers[i].ccy] = parseFloat(
+        subtotalMatch[1].replace(/,/g, '')
+      );
     }
-    denominations[headers[i].ccy] = parseDenominationLines(block);
+
+    denominations[headers[i].ccy] =
+      parseDenominationLines(block);
   }
 
-  // Newer app format: flat currency lines like ":flag-ph: PHP: ₱341,699.64"
-  // (no per-currency denomination breakdown, no "Subtotal" — the whole line
-  // IS the total). Only used as a fallback when the header-block format above
-  // found nothing, so older/richer messages keep using their full parse path.
+  // Newer flat cash-count format:
+  // :flag-ph: PHP: ₱341,699.64
   if (headers.length === 0) {
-    const flatLineRegex = /:[\w-]+:\s*([A-Z]{3}):\s*(?:₱|\$|€|£|¥|HK\$|S\$|A\$|C\$|SR|฿|₩)?\s*([\d,]+\.?\d*)/g;
+    const flatLineRegex =
+      /:[\w-]+:\s*([A-Z]{3}):\s*(?:₱|\$|€|£|¥|HK\$|S\$|A\$|C\$|SR|฿|₩)?\s*([\d,]+\.?\d*)/g;
+
     let flatMatch;
-    while ((flatMatch = flatLineRegex.exec(section)) !== null) {
+
+    while (
+      (flatMatch = flatLineRegex.exec(section)) !== null
+    ) {
       const ccy = flatMatch[1];
-      const amount = parseFloat(flatMatch[2].replace(/,/g, ''));
-      if (!isNaN(amount)) totals[ccy] = amount;
+
+      const amount = parseFloat(
+        flatMatch[2].replace(/,/g, '')
+      );
+
+      if (!isNaN(amount)) {
+        totals[ccy] = amount;
+      }
     }
   }
 
-  return { totals, denominations };
+  return {
+    totals,
+    denominations
+  };
 }
 
-// Extracts named blocks under OTHERS (e.g. "Hive", "Opex") with their Subtotal
+/**
+ * Extract older OTHERS blocks such as Hive and Opex.
+ */
 function extractNamedBlocks(section) {
   const totals = {};
   const denominations = {};
-  const headerRegex = /:[\w_]+:\s*([A-Za-z]+)\n/g;
+
+  const headerRegex =
+    /:[\w_]+:\s*([A-Za-z]+)\n/g;
+
   let match;
   const headers = [];
+
   while ((match = headerRegex.exec(section)) !== null) {
-    headers.push({ name: match[1], index: match.index });
+    headers.push({
+      name: match[1],
+      index: match.index
+    });
   }
+
   for (let i = 0; i < headers.length; i++) {
     const start = headers[i].index;
-    const end = i + 1 < headers.length ? headers[i + 1].index : section.length;
+
+    const end =
+      i + 1 < headers.length
+        ? headers[i + 1].index
+        : section.length;
+
     const block = section.slice(start, end);
-    const subtotalMatch = block.match(/\*Subtotal:\s*[^\d]*([\d,]+\.?\d*)\*/);
+
+    const subtotalMatch = block.match(
+      /\*Subtotal:\s*[^\d]*([\d,]+\.?\d*)\*/
+    );
+
     if (subtotalMatch) {
-      totals[headers[i].name] = parseFloat(subtotalMatch[1].replace(/,/g, ''));
+      totals[headers[i].name] = parseFloat(
+        subtotalMatch[1].replace(/,/g, '')
+      );
     }
-    denominations[headers[i].name] = parseDenominationLines(block);
+
+    denominations[headers[i].name] =
+      parseDenominationLines(block);
   }
-  return { totals, denominations };
+
+  return {
+    totals,
+    denominations
+  };
 }
 
 function matchOne(text, regex) {
@@ -182,81 +272,193 @@ function matchOne(text, regex) {
 }
 
 /**
- * Parses a transaction ticket message (VN #####, AR #####, or ARN #####).
- * Handles both single-currency client tickets and multi-currency wholesale
- * tickets (one message can list several BUY/SELL lines, one per currency).
+ * Parses transaction tickets.
  *
- * Returns { ref, isWholesale, movements: [{ action, ccy, fcyAmount }],
- *           phpAmount, raw } or null if unparseable.
+ * Supports:
+ * VN #####
+ * AR #####
+ * ARN #####
+ *
+ * Also supports multi-currency wholesale transactions.
  */
 function parseTransaction(text) {
   if (!text) return null;
 
-  // Ticket prefix: check ARN before AR, since "ARN" also contains "AR" as a substring.
-  const refMatch = text.match(/(?:VN|ARN|AR)\s*#?\s*0*(\d+)/i);
+  const refMatch = text.match(
+    /(?:VN|ARN|AR)\s*#?\s*0*(\d+)/i
+  );
+
   if (!refMatch) return null;
+
   const ref = refMatch[1];
 
-  // Every BUY/SELL <amount> <CCY> line in the message — wholesale tickets often
-  // list several currencies in one post (e.g. a multi-currency Sun Forex deal).
   const movements = [];
-  const lineRegex = /\b(BUY|SELL)\s*([\d,]+)\s*([A-Z]{3})\b/gi;
+
+  const lineRegex =
+    /\b(BUY|SELL)\s*([\d,]+)\s*([A-Z]{3})\b/gi;
+
   let m;
+
   while ((m = lineRegex.exec(text)) !== null) {
     movements.push({
       action: m[1].toUpperCase(),
       ccy: m[3].toUpperCase(),
-      fcyAmount: parseFloat(m[2].replace(/,/g, ''))
+      fcyAmount: parseFloat(
+        m[2].replace(/,/g, '')
+      )
     });
   }
-  if (movements.length === 0) return null;
 
-  // Overall PHP value: prefer an explicit "TOTAL" line (used on multi-currency
-  // tickets), otherwise fall back to the last ₱/= amount in the message.
-  const totalMatch = text.match(/TOTAL\s*:?\s*[₱P]?\s*([\d,]+\.?\d*)/i);
+  if (movements.length === 0) {
+    return null;
+  }
+
+  // Prefer an explicit TOTAL for multi-currency tickets.
+  const totalMatch = text.match(
+    /TOTAL\s*:?\s*[₱P]?\s*([\d,]+\.?\d*)/i
+  );
+
   let phpAmount = null;
+
   if (totalMatch) {
-    phpAmount = parseFloat(totalMatch[1].replace(/,/g, ''));
+    phpAmount = parseFloat(
+      totalMatch[1].replace(/,/g, '')
+    );
   } else {
-    const phpMatches = [...text.matchAll(/(?:₱|=\s*)\s*([\d,]+\.?\d*)/g)];
+    const phpMatches = [
+      ...text.matchAll(
+        /(?:₱|=\s*)\s*([\d,]+\.?\d*)/g
+      )
+    ];
+
     if (phpMatches.length) {
-      phpAmount = parseFloat(phpMatches[phpMatches.length - 1][1].replace(/,/g, ''));
+      phpAmount = parseFloat(
+        phpMatches[
+          phpMatches.length - 1
+        ][1].replace(/,/g, '')
+      );
     }
   }
 
-  const isWholesale = /CORPORATION|FOREX|EXCHANGE|CZARINA|SUNFOREX|MONEYBEES/i.test(text)
-    && !/NEW CLIENT|OLD CLIENT/i.test(text);
+  const isWholesale =
+    /CORPORATION|FOREX|EXCHANGE|CZARINA|SUNFOREX|MONEYBEES/i.test(
+      text
+    ) &&
+    !/NEW CLIENT|OLD CLIENT/i.test(text);
 
-  return { ref, isWholesale, movements, phpAmount, raw: text };
+  return {
+    ref,
+    isWholesale,
+    movements,
+    phpAmount,
+    raw: text
+  };
 }
 
 /**
- * Parses a Hive balance-update message, e.g.:
- *   "*Updated Balance (PHP)*\n*Amount: 100,000.00*"
- * Returns { amount } (can be negative) or null if unparseable.
+ * Parses Hive balance updates.
  */
 function parseHiveEntry(text) {
-  if (!text || !text.includes('Updated Balance')) return null;
-  const match = text.match(/\*Amount:\s*(-?[\d,]+\.?\d*)\*/);
+  if (
+    !text ||
+    !text.includes('Updated Balance')
+  ) {
+    return null;
+  }
+
+  const match = text.match(
+    /\*Amount:\s*(-?[\d,]+\.?\d*)\*/
+  );
+
   if (!match) return null;
-  return { amount: parseFloat(match[1].replace(/,/g, '')) };
+
+  return {
+    amount: parseFloat(
+      match[1].replace(/,/g, '')
+    )
+  };
 }
 
 /**
- * Parses an expense entry (e.g. "Date: Aug 13, 2026\nAMOUNT: 4,500\nPurpose: ...").
- * Most entries are outflows that reduce the till's Opex float. An entry containing
- * "TOP-UP" or "REPLENISH" is treated as money going the other way (added to Opex).
- * Handles "100k" shorthand (= 100,000) alongside plain/comma'd numbers.
- * Returns { amount } — already signed (negative = spent, positive = topped up) — or null.
+ * Parses expense/replenishment Slack entries.
+ *
+ * IMPORTANT:
+ * We use the FINAL amount written on the Amount line.
+ *
+ * Examples:
+ *
+ * Amount: Php 68 + 108 = Php 176
+ * -> 176
+ *
+ * Amount: Php 2,199 + 12 biller fee = Php 2,211
+ * -> 2,211
+ *
+ * Amount: Php 830
+ * -> 830
+ *
+ * Replenishment / Top-up = money INTO forex cash
+ * Normal expense = money OUT
  */
 function parseExpenseEntry(text) {
   if (!text) return null;
-  const match = text.match(/amount\s*:?\s*([\d,]+\.?\d*)\s*(k)?/i);
-  if (!match) return null;
-  let amount = parseFloat(match[1].replace(/,/g, ''));
-  if (match[2]) amount *= 1000; // "100k" shorthand
-  const isTopUp = /top[\s-]?up|replenish/i.test(text);
-  return { amount: isTopUp ? amount : -amount };
+
+  // Only inspect the Amount line.
+  // This prevents dates, reference numbers, approvals,
+  // etc. from being mistaken for the cash amount.
+  const amountLineMatch = String(text).match(
+    /amount\s*:?\s*([^\n\r]+)/i
+  );
+
+  if (!amountLineMatch) {
+    return null;
+  }
+
+  const amountLine = amountLineMatch[1]
+    .replace(/\*/g, ' ')
+    .replace(/\u00A0/g, ' ')
+    .trim();
+
+  // Find every number on the Amount line.
+  // The FINAL number is the stated total.
+  const numberMatches = [
+    ...amountLine.matchAll(
+      /([\d,]+(?:\.\d+)?)\s*(k)?\b/gi
+    )
+  ];
+
+  if (numberMatches.length === 0) {
+    return null;
+  }
+
+  const last =
+    numberMatches[numberMatches.length - 1];
+
+  let amount = parseFloat(
+    last[1].replace(/,/g, '')
+  );
+
+  if (!Number.isFinite(amount)) {
+    return null;
+  }
+
+  // Supports shorthand such as 100k.
+  if (last[2]) {
+    amount *= 1000;
+  }
+
+  const isTopUp =
+    /top[\s-]?up|replenish/i.test(text);
+
+  return {
+    amount: isTopUp
+      ? amount
+      : -amount
+  };
 }
 
-module.exports = { parseCashCount, parseTransaction, parseHiveEntry, parseExpenseEntry };
+module.exports = {
+  parseCashCount,
+  parseTransaction,
+  parseHiveEntry,
+  parseExpenseEntry
+};
