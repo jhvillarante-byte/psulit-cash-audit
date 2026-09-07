@@ -398,6 +398,16 @@ function parseHiveEntry(text) {
 function parseExpenseEntry(text) {
   if (!text) return null;
 
+  const category = matchOne(
+    String(text),
+    /(?:^|\n)\s*\*?\s*category\s*:\s*\*?\s*([^\n\r*]+)/i
+  );
+
+  const description = matchOne(
+    String(text),
+    /(?:^|\n)\s*\*?\s*description\s*:\s*\*?\s*([^\n\r*]+)/i
+  );
+
   // Read only the Amount line, not dates, IDs or approvals.
   const amountLineMatch = String(text).match(
     /(?:^|\n)\s*\*?\s*amount\s*:?\s*([^\n\r]+)/i
@@ -435,8 +445,64 @@ function parseExpenseEntry(text) {
   const isTopUp =
     /top[\s-]?up|replenish/i.test(text);
 
+  const isReceivable =
+    /^receivable$/i.test(category || '');
+
+  let cashMovement = null;
+
+  if (isReceivable && description) {
+    const quantityThenCurrency = description.match(
+      /\b([\d,]+(?:\.\d+)?)\s*([A-Z]{3})\b/
+    );
+
+    const currencyThenQuantity = description.match(
+      /\b([A-Z]{3})\s*([\d,]+(?:\.\d+)?)\b/
+    );
+
+    const movement = quantityThenCurrency
+      ? {
+          quantity: quantityThenCurrency[1],
+          currency: quantityThenCurrency[2]
+        }
+      : currencyThenQuantity
+        ? {
+            quantity: currencyThenQuantity[2],
+            currency: currencyThenQuantity[1]
+          }
+        : null;
+
+    if (movement) {
+      const quantity = parseFloat(
+        movement.quantity.replace(/,/g, '')
+      );
+
+      if (Number.isFinite(quantity) && quantity > 0) {
+        cashMovement = {
+          ccy: movement.currency,
+          amount: -quantity
+        };
+      }
+    }
+  }
+
   return {
-    amount: isTopUp ? amount : -amount
+    amount:
+      isReceivable
+        ? 0
+        : isTopUp
+          ? amount
+          : -amount,
+    category,
+    description,
+    isReceivable,
+    pesoValuation:
+      isReceivable
+        ? amount
+        : null,
+    cashMovement,
+    needsReview:
+      isReceivable &&
+      !cashMovement
   };
 }
 

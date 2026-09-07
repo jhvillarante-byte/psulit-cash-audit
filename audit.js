@@ -1004,6 +1004,22 @@ function buildShiftSummary({
     lines.push(
       `💼 ${expenseEntries.length} expense/replenishment entr${expenseEntries.length > 1 ? 'ies' : 'y'} included (net ${total >= 0 ? '+' : '-'}${moneyLabel('PHP', Math.abs(total))}).`
     );
+
+    for (const entry of expenseEntries) {
+      if (!entry.isReceivable) {
+        continue;
+      }
+
+      if (entry.cashMovement) {
+        lines.push(
+          `💳 ${expenseLabel(entry.raw)}: ${moneyLabel(entry.cashMovement.ccy, Math.abs(entry.cashMovement.amount))} cash out; peso valuation ${moneyLabel('PHP', entry.pesoValuation)}.`
+        );
+      } else {
+        lines.push(
+          `⚠️ ${expenseLabel(entry.raw)}: receivable cash movement could not be determined; peso valuation ${moneyLabel('PHP', entry.pesoValuation)}. Review required.`
+        );
+      }
+    }
   }
 
   if (
@@ -1037,6 +1053,21 @@ function buildShiftSummary({
     !stillOpen.length &&
     !resolved.length
   ) {
+    if (
+      expenseEntries.some(
+        entry =>
+          entry.needsReview
+      )
+    ) {
+      lines.push(
+        '⚠️ Cash reconciliation cannot be cleared until the receivable cash movement is reviewed.'
+      );
+
+      return lines.join(
+        '\n'
+      );
+    }
+
     lines.push(
       `✅ All good. ${tickets.length} transactions checked, everything matches.`
     );
@@ -1553,13 +1584,38 @@ async function runShiftAudit(
       cashMovementTotal;
 
     const adjustments =
+      {};
+
+    if (
       phpAdjustment !==
         0
-        ? {
-            PHP:
-              phpAdjustment
-          }
-        : {};
+    ) {
+      adjustments.PHP =
+        phpAdjustment;
+    }
+
+    for (
+      const entry of
+        expenseEntries
+    ) {
+      if (
+        !entry.cashMovement
+      ) {
+        continue;
+      }
+
+      const {
+        ccy,
+        amount
+      } = entry.cashMovement;
+
+      adjustments[ccy] =
+        (
+          adjustments[ccy] ||
+          0
+        ) +
+        amount;
+    }
 
     const results =
       reconcile(
