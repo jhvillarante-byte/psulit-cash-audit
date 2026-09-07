@@ -544,6 +544,49 @@ function statedExpenseDate(
   ].join('/');
 }
 
+function buildExpenseAdjustments(
+  expenseEntries,
+  phpAdjustment
+) {
+  const adjustments =
+    {};
+
+  if (
+    phpAdjustment !==
+      0
+  ) {
+    adjustments.PHP =
+      phpAdjustment;
+  }
+
+  for (
+    const entry of
+      expenseEntries
+  ) {
+    if (
+      !entry.cashMovement ||
+      entry.cashMovement.source !==
+        'Forex drawer'
+    ) {
+      continue;
+    }
+
+    const {
+      ccy,
+      amount
+    } = entry.cashMovement;
+
+    adjustments[ccy] =
+      (
+        adjustments[ccy] ||
+        0
+      ) +
+      amount;
+  }
+
+  return adjustments;
+}
+
 /**
  * Reads natural-language PHP cash movements
  * posted in the general channel.
@@ -1012,7 +1055,7 @@ function buildShiftSummary({
 
       if (entry.cashMovement) {
         lines.push(
-          `💳 ${expenseLabel(entry.raw)}: ${moneyLabel(entry.cashMovement.ccy, Math.abs(entry.cashMovement.amount))} cash out; peso valuation ${moneyLabel('PHP', entry.pesoValuation)}.`
+          `💳 ${expenseLabel(entry.raw)}: ${moneyLabel(entry.cashMovement.ccy, Math.abs(entry.cashMovement.amount))} cash out from ${entry.cashMovement.source || 'unconfirmed source'}; peso valuation ${moneyLabel('PHP', entry.pesoValuation)}.`
         );
       } else {
         lines.push(
@@ -1584,38 +1627,10 @@ async function runShiftAudit(
       cashMovementTotal;
 
     const adjustments =
-      {};
-
-    if (
-      phpAdjustment !==
-        0
-    ) {
-      adjustments.PHP =
-        phpAdjustment;
-    }
-
-    for (
-      const entry of
-        expenseEntries
-    ) {
-      if (
-        !entry.cashMovement
-      ) {
-        continue;
-      }
-
-      const {
-        ccy,
-        amount
-      } = entry.cashMovement;
-
-      adjustments[ccy] =
-        (
-          adjustments[ccy] ||
-          0
-        ) +
-        amount;
-    }
+      buildExpenseAdjustments(
+        expenseEntries,
+        phpAdjustment
+      );
 
     const results =
       reconcile(
@@ -2294,6 +2309,7 @@ async function runCloseVsOpenCheck(
 module.exports = {
   runShiftAudit,
   runCloseVsOpenCheck,
+  buildExpenseAdjustments,
   isScheduledOpening,
   isScheduledClosing
 };

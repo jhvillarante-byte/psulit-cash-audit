@@ -12,6 +12,7 @@ const SYMBOL_TO_CCY = {
   'P': 'PHP',
   '$': 'USD',
   'S$': 'SGD',
+  'NT$': 'TWD',
   'HK$': 'HKD',
   '¥': 'CNY',
   '£': 'GBP',
@@ -192,7 +193,7 @@ function extractCurrencyBlocks(section) {
   // :flag-ph: PHP: ₱341,699.64
   if (headers.length === 0) {
     const flatLineRegex =
-      /:[\w-]+:\s*([A-Z]{3}):\s*(?:₱|\$|€|£|¥|HK\$|S\$|A\$|C\$|SR|฿|₩)?\s*([\d,]+\.?\d*)/g;
+      /:[\w-]+:\s*([A-Z]{3}):\s*(?:₱|\$|€|£|¥|HK\$|S\$|NT\$|A\$|C\$|SR|฿|₩)?\s*([\d,]+\.?\d*)/g;
 
     let flatMatch;
 
@@ -403,10 +404,16 @@ function parseExpenseEntry(text) {
     /(?:^|\n)\s*\*?\s*category\s*:\s*\*?\s*([^\n\r*]+)/i
   );
 
-  const description = matchOne(
-    String(text),
-    /(?:^|\n)\s*\*?\s*description\s*:\s*\*?\s*([^\n\r*]+)/i
+  const descriptionMatch = String(text).match(
+    /(?:^|\n)\s*\*?\s*description\s*:\s*\*?\s*([\s\S]*?)(?=\n\s*\*?\s*amount\s*:|$)/i
   );
+
+  const description = descriptionMatch
+    ? descriptionMatch[1]
+        .replace(/\*/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+    : null;
 
   // Read only the Amount line, not dates, IDs or approvals.
   const amountLineMatch = String(text).match(
@@ -449,8 +456,14 @@ function parseExpenseEntry(text) {
     /^receivable$/i.test(category || '');
 
   let cashMovement = null;
+  let fundingSource = null;
 
   if (isReceivable && description) {
+    // Confirmed business mapping: SMART Postpaid receivables are paid from
+    // the separately tracked Scratch fund, not the physical Forex PHP drawer.
+    const isScratchFunded =
+      /\bscratch\b|\bsmart\s+postpaid\b/i.test(description);
+
     const quantityThenCurrency = description.match(
       /\b([\d,]+(?:\.\d+)?)\s*([A-Z]{3})\b/
     );
@@ -471,15 +484,30 @@ function parseExpenseEntry(text) {
           }
         : null;
 
-    if (movement) {
+    if (isScratchFunded) {
+      fundingSource = 'Scratch';
+      cashMovement = {
+        ccy: 'PHP',
+        amount: -amount,
+        source: fundingSource
+      };
+    } else if (movement) {
       const quantity = parseFloat(
         movement.quantity.replace(/,/g, '')
       );
 
       if (Number.isFinite(quantity) && quantity > 0) {
+        fundingSource =
+          movement.currency === 'PHP'
+            ? /\bforex\b/i.test(description)
+              ? 'Forex drawer'
+              : null
+            : 'Forex drawer';
+
         cashMovement = {
           ccy: movement.currency,
-          amount: -quantity
+          amount: -quantity,
+          source: fundingSource
         };
       }
     }
@@ -500,9 +528,13 @@ function parseExpenseEntry(text) {
         ? amount
         : null,
     cashMovement,
+    fundingSource,
     needsReview:
       isReceivable &&
-      !cashMovement
+      (
+        !cashMovement ||
+        !fundingSource
+      )
   };
 }
 
