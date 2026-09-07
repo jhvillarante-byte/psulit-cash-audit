@@ -1112,7 +1112,11 @@ function buildShiftSummary({
     }
 
     lines.push(
-      `✅ All good. ${tickets.length} transactions checked, everything matches.`
+      `✅ All forex currencies reconciled. ${tickets.length} transactions checked.`
+    );
+
+    lines.push(
+      'ℹ️ Scratch, JuanPay, Hive, Opex, and other funds are not yet fully reconciled.'
     );
 
     return lines.join(
