@@ -1422,7 +1422,15 @@ async function runShiftAudit(
           }
         );
 
-      const shiftDate =
+      const shiftStartDate =
+        (
+          openingCount.timestamp ||
+          ''
+        )
+          .split(',')[0]
+          .trim();
+
+      const shiftEndDate =
         (
           closingCount.timestamp ||
           ''
@@ -1445,9 +1453,10 @@ async function runShiftAudit(
 
         if (
           entryDate &&
-          shiftDate &&
           entryDate !==
-            shiftDate
+            shiftStartDate &&
+          entryDate !==
+            shiftEndDate
         ) {
           continue;
         }
