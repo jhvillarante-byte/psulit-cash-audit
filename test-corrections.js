@@ -146,6 +146,7 @@ for (const [currency, flag] of Object.entries(supportedFlags)) {
   assert(first.includes('*CORRECTED SHIFT AUDIT*'), 'historical report must be clearly labeled');
   assert(first.includes('Approved opening correction — 🇪🇺 EUR: €235.00 → €255.00'));
   assert(first.includes('approved by Corporate Psulit; Slack 1788908073.626909'));
+  assert(first.includes('✅ 🇪🇺 EUR reconciled: €255.00 + €300.00 − €555.00 = €0.00.'));
   assert(!first.includes('❗ 🇪🇺 EUR:'), 'EUR must reconcile after 255 + 300 - 555 = 0');
   assert(first.includes('❗ 🇨🇦 CAD: expected C$2,300.00, but missing from closing count'), 'CAD discrepancy must remain independent');
   assert(first.includes('❗ 🇵🇭 PHP: short ₱100,000.00'), 'PHP discrepancy must remain independent');

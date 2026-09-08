@@ -1026,6 +1026,7 @@ function buildShiftSummary({
   cashMovementEntries,
   appliedCorrections,
   correctedHistorical,
+  results,
   stillOpen,
   resolved,
   dryRun
@@ -1069,6 +1070,24 @@ function buildShiftSummary({
       `(${correction.openingRef}; approved by ${correction.approval.approver}; ` +
       `Slack ${correction.approval.sourceMessageTs}).`
     );
+
+    const correctedResult = (results || []).find(
+      result => result.ccy === correction.currency
+    );
+    if (correctedResult && correctedResult.match) {
+      const movementTerms = tickets
+        .map(ticket => transactionEffectForCurrency(ticket.parsed, correction.currency))
+        .filter(effect => effect !== 0)
+        .map(effect =>
+          `${effect > 0 ? '+' : '−'} ${moneyLabel(correction.currency, Math.abs(effect))}`
+        );
+      lines.push(
+        `✅ ${currencyHeading(correction.currency)} reconciled: ` +
+        `${moneyLabel(correction.currency, correction.correctedValue)}` +
+        `${movementTerms.length ? ` ${movementTerms.join(' ')}` : ''} = ` +
+        `${moneyLabel(correction.currency, correctedResult.actual)}.`
+      );
+    }
   }
 
   if ((appliedCorrections || []).length) lines.push('');
@@ -1752,6 +1771,7 @@ async function runShiftAudit(
           correctionResult.applied,
         correctedHistorical:
           Boolean(openingCountOverride),
+        results,
         stillOpen,
         resolved,
         dryRun
