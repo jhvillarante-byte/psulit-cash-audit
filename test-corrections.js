@@ -113,8 +113,19 @@ slack.replyInThread = async () => { throw new Error('Slack posting must not occu
 
 delete require.cache[require.resolve('./audit')];
 delete require.cache[require.resolve('./test-routes')];
-const { runShiftAudit } = require('./audit');
+const { runShiftAudit, currencyHeading } = require('./audit');
 const { findCountByReference } = require('./test-routes');
+
+const supportedFlags = {
+  PHP: '🇵🇭', USD: '🇺🇸', JPY: '🇯🇵', HKD: '🇭🇰', CAD: '🇨🇦',
+  GBP: '🇬🇧', EUR: '🇪🇺', CHF: '🇨🇭', SGD: '🇸🇬', AUD: '🇦🇺',
+  BHD: '🇧🇭', NZD: '🇳🇿', MYR: '🇲🇾', SAR: '🇸🇦', THB: '🇹🇭',
+  TWD: '🇹🇼', AED: '🇦🇪', CNY: '🇨🇳', IDR: '🇮🇩', BND: '🇧🇳',
+  KRW: '🇰🇷', QAR: '🇶🇦', KWD: '🇰🇼', JOD: '🇯🇴', VND: '🇻🇳'
+};
+for (const [currency, flag] of Object.entries(supportedFlags)) {
+  assert.strictEqual(currencyHeading(currency), `${flag} ${currency}`);
+}
 
 (async () => {
   const exact = await findCountByReference('cash', 'Solaire', 'PSC-MTS2WZJV-9LGR');
@@ -132,11 +143,14 @@ const { findCountByReference } = require('./test-routes');
     { dryRun: true, openingCountOverride: openingOverride }
   );
   assert.strictEqual(first, second, 'historical reruns must be deterministic and not double-apply corrections');
-  assert(first.includes('Approved opening correction — EUR: €235.00 → €255.00'));
+  assert(first.includes('*CORRECTED SHIFT AUDIT*'), 'historical report must be clearly labeled');
+  assert(first.includes('Approved opening correction — 🇪🇺 EUR: €235.00 → €255.00'));
   assert(first.includes('approved by Corporate Psulit; Slack 1788908073.626909'));
-  assert(!first.includes('❗ EUR:'), 'EUR must reconcile after 255 + 300 - 555 = 0');
-  assert(first.includes('❗ CAD: expected C$2,300.00, but missing from closing count'), 'CAD discrepancy must remain independent');
-  assert(first.includes('❗ PHP: short ₱100,000.00'), 'PHP discrepancy must remain independent');
+  assert(!first.includes('❗ 🇪🇺 EUR:'), 'EUR must reconcile after 255 + 300 - 555 = 0');
+  assert(first.includes('❗ 🇨🇦 CAD: expected C$2,300.00, but missing from closing count'), 'CAD discrepancy must remain independent');
+  assert(first.includes('❗ 🇵🇭 PHP: short ₱100,000.00'), 'PHP discrepancy must remain independent');
+  assert(first.includes('*🇨🇦 CAD*'), 'full math must use the correct CAD flag');
+  assert(first.includes('*🇵🇭 PHP*'), 'full math must use the correct PHP flag');
   assert.strictEqual(opening.totals.EUR, 235, 'reruns must not mutate the original count');
 
   console.log(first);

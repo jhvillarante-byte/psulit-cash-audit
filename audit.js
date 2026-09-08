@@ -69,13 +69,32 @@ const CCY_SYMBOL = {
   CNY: '¥'
 };
 
-const CCY_EMOJI = {
-  PHP: '💴',
-  USD: '💵',
-  EUR: '💶',
-  GBP: '💷',
-  JPY: '💴',
-  KRW: '💴'
+const CCY_FLAG = {
+  PHP: '🇵🇭',
+  USD: '🇺🇸',
+  JPY: '🇯🇵',
+  HKD: '🇭🇰',
+  CAD: '🇨🇦',
+  GBP: '🇬🇧',
+  EUR: '🇪🇺',
+  CHF: '🇨🇭',
+  SGD: '🇸🇬',
+  AUD: '🇦🇺',
+  BHD: '🇧🇭',
+  NZD: '🇳🇿',
+  MYR: '🇲🇾',
+  SAR: '🇸🇦',
+  THB: '🇹🇭',
+  TWD: '🇹🇼',
+  AED: '🇦🇪',
+  CNY: '🇨🇳',
+  IDR: '🇮🇩',
+  BND: '🇧🇳',
+  KRW: '🇰🇷',
+  QAR: '🇶🇦',
+  KWD: '🇰🇼',
+  JOD: '🇯🇴',
+  VND: '🇻🇳'
 };
 
 const LAST_FAILURE_NOTICE = new Map();
@@ -99,6 +118,12 @@ function moneyLabel(ccy, amount) {
   return symbol
     ? `${symbol}${fmt(amount)}`
     : `${fmt(amount)} ${ccy}`;
+}
+
+function currencyHeading(ccy) {
+  return CCY_FLAG[ccy]
+    ? `${CCY_FLAG[ccy]} ${ccy}`
+    : ccy;
 }
 
 function shouldPostFailureNotice(branch, kind) {
@@ -1000,6 +1025,7 @@ function buildShiftSummary({
   expenseEntries,
   cashMovementEntries,
   appliedCorrections,
+  correctedHistorical,
   stillOpen,
   resolved,
   dryRun
@@ -1021,6 +1047,10 @@ function buildShiftSummary({
     );
   }
 
+  if (correctedHistorical) {
+    lines.push('*CORRECTED SHIFT AUDIT*');
+  }
+
   lines.push(
     `🔍 ${branchConfig.name} — ${dateLabel}, ${windowLabel(closingCount)}`
   );
@@ -1033,7 +1063,7 @@ function buildShiftSummary({
 
   for (const correction of appliedCorrections || []) {
     lines.push(
-      `✏️ Approved opening correction — ${correction.currency}: ` +
+      `✏️ Approved opening correction — ${currencyHeading(correction.currency)}: ` +
       `${moneyLabel(correction.currency, correction.originalValue)} → ` +
       `${moneyLabel(correction.currency, correction.correctedValue)} ` +
       `(${correction.openingRef}; approved by ${correction.approval.approver}; ` +
@@ -1154,7 +1184,7 @@ function buildShiftSummary({
         !r.missingFromClosing
       ) {
         lines.push(
-          `❗ ${r.ccy}: not in opening count; ${moneyLabel(r.ccy, r.actual)} at closing`
+          `❗ ${currencyHeading(r.ccy)}: not in opening count; ${moneyLabel(r.ccy, r.actual)} at closing`
         );
 
       } else if (
@@ -1162,12 +1192,12 @@ function buildShiftSummary({
         !r.missingFromOpening
       ) {
         lines.push(
-          `❗ ${r.ccy}: expected ${moneyLabel(r.ccy, r.expected)}, but missing from closing count`
+          `❗ ${currencyHeading(r.ccy)}: expected ${moneyLabel(r.ccy, r.expected)}, but missing from closing count`
         );
 
       } else {
         lines.push(
-          `❗ ${r.ccy}: ${r.diff < 0 ? 'short' : 'extra'} ${moneyLabel(r.ccy, Math.abs(r.diff))}`
+          `❗ ${currencyHeading(r.ccy)}: ${r.diff < 0 ? 'short' : 'extra'} ${moneyLabel(r.ccy, Math.abs(r.diff))}`
         );
       }
     }
@@ -1180,7 +1210,7 @@ function buildShiftSummary({
     resolved
   ) {
     lines.push(
-      `✅ ${r.ccy} resolved — corrected closing cash count now reconciles.`
+      `✅ ${currencyHeading(r.ccy)} resolved — corrected closing cash count now reconciles.`
     );
   }
 
@@ -1260,14 +1290,8 @@ function buildShiftMath({
     const ccy =
       r.ccy;
 
-    const emoji =
-      CCY_EMOJI[
-        ccy
-      ] ||
-      '•';
-
     lines.push(
-      `${emoji} *${ccy}*`
+      `*${currencyHeading(ccy)}*`
     );
 
     lines.push(
@@ -1726,6 +1750,8 @@ async function runShiftAudit(
         cashMovementEntries,
         appliedCorrections:
           correctionResult.applied,
+        correctedHistorical:
+          Boolean(openingCountOverride),
         stillOpen,
         resolved,
         dryRun
@@ -1841,7 +1867,7 @@ function buildHandoverMath({
       r.ccy;
 
     lines.push(
-      `*${ccy}*`
+      `*${currencyHeading(ccy)}*`
     );
 
     lines.push(
@@ -2221,7 +2247,7 @@ async function runCloseVsOpenCheck(
         stillOpen
       ) {
         lines.push(
-          `❗ ${r.ccy}: ${r.diff < 0 ? 'short' : 'extra'} ${moneyLabel(r.ccy, Math.abs(r.diff))}`
+          `❗ ${currencyHeading(r.ccy)}: ${r.diff < 0 ? 'short' : 'extra'} ${moneyLabel(r.ccy, Math.abs(r.diff))}`
         );
       }
     }
@@ -2231,7 +2257,7 @@ async function runCloseVsOpenCheck(
       resolved
     ) {
       lines.push(
-        `✅ ${r.ccy} handover now reconciles.`
+        `✅ ${currencyHeading(r.ccy)} handover now reconciles.`
       );
     }
 
@@ -2336,6 +2362,7 @@ module.exports = {
   runShiftAudit,
   runCloseVsOpenCheck,
   buildExpenseAdjustments,
+  currencyHeading,
   isScheduledOpening,
   isScheduledClosing
 };
