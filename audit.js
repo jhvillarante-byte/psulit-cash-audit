@@ -1078,6 +1078,7 @@ function buildShiftSummary({
       const movementTerms = tickets
         .map(ticket => transactionEffectForCurrency(ticket.parsed, correction.currency))
         .filter(effect => effect !== 0)
+        .sort((left, right) => Number(right > 0) - Number(left > 0))
         .map(effect =>
           `${effect > 0 ? '+' : '−'} ${moneyLabel(correction.currency, Math.abs(effect))}`
         );
