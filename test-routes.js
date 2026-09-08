@@ -30,6 +30,7 @@ const {
 
 const { reconcile } = require('./reconcile');
 const { windowLabel } = require('./schedule');
+const { correctionsForOpening } = require('./corrections');
 
 const PAGE_SIZE = 200;
 const MAX_PAGES = 10;
@@ -120,6 +121,23 @@ async function findMostRecent(
     ).toFixed(6);
   }
 
+  return null;
+}
+
+async function findCountByReference(channelId, branchName, reference) {
+  let latest;
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const msgs = await history(channelId, { latest, limit: PAGE_SIZE });
+    if (!msgs.length) break;
+    for (const msg of msgs) {
+      const parsed = parseCashCount(msg.text || '');
+      if (parsed && parsed.branch === branchName && parsed.refCode === reference) {
+        return { msg, parsed: { ...parsed, _ts: msg.ts } };
+      }
+    }
+    if (msgs.length < PAGE_SIZE) break;
+    latest = (parseFloat(msgs[msgs.length - 1].ts) - 0.000001).toFixed(6);
+  }
   return null;
 }
 
@@ -426,8 +444,55 @@ function registerTestRoutes(app, BRANCHES) {
    * CORRECTED SHIFT AUDIT
    */
   app.get(
-    '/test/corrected-shift-audit',
+    ['/test/corrected-shift-audit', '/test/historical-corrected-shift-audit'],
     async (req, res) => {
+      try {
+        const branchConfig = byName.get((req.query.branch || '').toLowerCase());
+        if (!branchConfig) return res.status(400).send(`Unknown branch. Known: ${[...byName.keys()].join(', ')}`);
+
+        const openingRef = String(req.query.openingRef || '').trim();
+        const closingRef = String(req.query.closingRef || '').trim();
+        if (!openingRef || !closingRef) {
+          return res.status(400).send('openingRef and closingRef are required; free-form opening overrides are not accepted.');
+        }
+
+        const [opening, closing] = await Promise.all([
+          findCountByReference(branchConfig.cashCountChannelId, branchConfig.name, openingRef),
+          findCountByReference(branchConfig.cashCountChannelId, branchConfig.name, closingRef)
+        ]);
+        if (!opening) return res.status(404).send(`Opening cash-count reference not found: ${openingRef}`);
+        if (!closing) return res.status(404).send(`Closing cash-count reference not found: ${closingRef}`);
+        if (!isScheduledOpening(opening.parsed)) return res.status(400).send(`${openingRef} is not a scheduled opening count.`);
+        if (!isScheduledClosing(closing.parsed)) return res.status(400).send(`${closingRef} is not a scheduled closing count.`);
+        if (parseFloat(opening.msg.ts) >= parseFloat(closing.msg.ts)) return res.status(400).send('Opening must precede closing.');
+        if (!correctionsForOpening(openingRef).length) return res.status(400).send(`No approved correction exists for ${openingRef}.`);
+
+        const dryRun = req.query.dry === '1';
+        const report = await runShiftAudit(
+          { ts: closing.msg.ts },
+          closing.parsed,
+          branchConfig,
+          { dryRun, openingCountOverride: opening.parsed }
+        );
+        if (dryRun) {
+          return res.type('text/plain').send(
+            `Using exact opening ref ${openingRef} at ${opening.parsed.timestamp}\n` +
+            `Using exact closing ref ${closingRef} at ${closing.parsed.timestamp}\n\n${report}`
+          );
+        }
+        return res.send(`Posted corrected historical shift audit for ${branchConfig.name}.`);
+      } catch (err) {
+        console.error('historical-corrected-shift-audit error:', err);
+        return res.status(500).type('text/plain').send(`Error: ${err.message}\n\n${err.stack || ''}`);
+      }
+    }
+  );
+
+  app.get(
+    '/test/legacy-corrected-shift-audit-disabled',
+    async (req, res) => {
+      return res.status(410).send('Free-form corrected audits are disabled. Use exact openingRef and closingRef with an approved correction.');
+      /* istanbul ignore next -- retained temporarily only to make the removed legacy implementation auditable */
       try {
         const branchConfig = byName.get(
           (req.query.branch || '').toLowerCase()
@@ -893,5 +958,6 @@ function registerTestRoutes(app, BRANCHES) {
 }
 
 module.exports = {
-  registerTestRoutes
+  registerTestRoutes,
+  findCountByReference
 };

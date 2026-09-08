@@ -4,7 +4,8 @@
   "description": "Posts a transaction-vs-cash-count reconciliation as a thread reply on every Psulit Cash Count Slack message.",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node test-receivable-expense.js && node test-corrections.js"
   },
   "dependencies": {
     "express": "^4.19.2",

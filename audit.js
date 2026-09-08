@@ -11,6 +11,7 @@
  */
 
 const { reconcile } = require('./reconcile');
+const { applyApprovedOpeningCorrections } = require('./corrections');
 
 const {
   history,
@@ -998,6 +999,7 @@ function buildShiftSummary({
   tickets,
   expenseEntries,
   cashMovementEntries,
+  appliedCorrections,
   stillOpen,
   resolved,
   dryRun
@@ -1028,6 +1030,18 @@ function buildShiftSummary({
   );
 
   lines.push('');
+
+  for (const correction of appliedCorrections || []) {
+    lines.push(
+      `✏️ Approved opening correction — ${correction.currency}: ` +
+      `${moneyLabel(correction.currency, correction.originalValue)} → ` +
+      `${moneyLabel(correction.currency, correction.correctedValue)} ` +
+      `(${correction.openingRef}; approved by ${correction.approval.approver}; ` +
+      `Slack ${correction.approval.sourceMessageTs}).`
+    );
+  }
+
+  if ((appliedCorrections || []).length) lines.push('');
 
   if (
     expenseEntries.length
@@ -1379,7 +1393,7 @@ async function runShiftAudit(
   closingEvent,
   closingCount,
   branchConfig,
-  { dryRun = false } = {}
+  { dryRun = false, openingCountOverride = null } = {}
 ) {
   const {
     cashCountChannelId,
@@ -1389,6 +1403,7 @@ async function runShiftAudit(
 
   try {
     const openingCount =
+      openingCountOverride ||
       await findOpeningForClosing(
         cashCountChannelId,
         closingEvent.ts,
@@ -1614,9 +1629,14 @@ async function runShiftAudit(
         0
       );
 
+    const correctionResult =
+      applyApprovedOpeningCorrections(
+        openingCount
+      );
+
     const openingTotals =
       stripUntracked({
-        ...openingCount.totals,
+        ...correctionResult.effectiveTotals,
         ...openingCount.others
       });
 
@@ -1704,6 +1724,8 @@ async function runShiftAudit(
         tickets,
         expenseEntries,
         cashMovementEntries,
+        appliedCorrections:
+          correctionResult.applied,
         stillOpen,
         resolved,
         dryRun
