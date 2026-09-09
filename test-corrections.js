@@ -143,9 +143,9 @@ for (const [currency, flag] of Object.entries(supportedFlags)) {
     { dryRun: true, openingCountOverride: openingOverride }
   );
   assert.strictEqual(first, second, 'historical reruns must be deterministic and not double-apply corrections');
-  assert(first.includes('*CORRECTED SHIFT AUDIT*'), 'historical report must be clearly labeled');
+  assert(!first.includes('CORRECTED SHIFT AUDIT'), 'corrected reports must retain the regular audit heading');
   assert(first.includes('Approved opening correction — 🇪🇺 EUR: €235.00 → €255.00'));
-  assert(first.includes('approved by Corporate Psulit; Slack 1788908073.626909'));
+  assert(first.includes('_Opening ref PSC-MTS2WZJV-9LGR · Approved by Corporate Psulit · Slack evidence 1788908073.626909_'));
   assert(first.includes('✅ 🇪🇺 EUR reconciled: €255.00 + €300.00 − €555.00 = €0.00.'));
   assert(!first.includes('❗ 🇪🇺 EUR:'), 'EUR must reconcile after 255 + 300 - 555 = 0');
   assert(first.includes('❗ 🇨🇦 CAD: expected C$2,300.00, but missing from closing count'), 'CAD discrepancy must remain independent');

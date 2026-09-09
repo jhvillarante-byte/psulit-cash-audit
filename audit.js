@@ -1025,7 +1025,6 @@ function buildShiftSummary({
   expenseEntries,
   cashMovementEntries,
   appliedCorrections,
-  correctedHistorical,
   results,
   stillOpen,
   resolved,
@@ -1048,10 +1047,6 @@ function buildShiftSummary({
     );
   }
 
-  if (correctedHistorical) {
-    lines.push('*CORRECTED SHIFT AUDIT*');
-  }
-
   lines.push(
     `🔍 ${branchConfig.name} — ${dateLabel}, ${windowLabel(closingCount)}`
   );
@@ -1066,9 +1061,11 @@ function buildShiftSummary({
     lines.push(
       `✏️ Approved opening correction — ${currencyHeading(correction.currency)}: ` +
       `${moneyLabel(correction.currency, correction.originalValue)} → ` +
-      `${moneyLabel(correction.currency, correction.correctedValue)} ` +
-      `(${correction.openingRef}; approved by ${correction.approval.approver}; ` +
-      `Slack ${correction.approval.sourceMessageTs}).`
+      `${moneyLabel(correction.currency, correction.correctedValue)}`
+    );
+    lines.push(
+      `_Opening ref ${correction.openingRef} · Approved by ${correction.approval.approver} · ` +
+      `Slack evidence ${correction.approval.sourceMessageTs}_`
     );
 
     const correctedResult = (results || []).find(
@@ -1770,8 +1767,6 @@ async function runShiftAudit(
         cashMovementEntries,
         appliedCorrections:
           correctionResult.applied,
-        correctedHistorical:
-          Boolean(openingCountOverride),
         results,
         stillOpen,
         resolved,
