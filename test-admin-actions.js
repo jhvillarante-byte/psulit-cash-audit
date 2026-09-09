@@ -27,6 +27,7 @@ const event = {
 };
 
 assert(actionForEvent(event, [testAction]), 'exact approved action must match');
+assert(actionForEvent({ ...event, text: `${testAction.trigger}\n*Sent using ChatGPT*` }, [testAction]));
 assert.strictEqual(actionForEvent({ ...event, user: 'U-TELLER' }, [testAction]), null);
 assert.strictEqual(actionForEvent({ ...event, channel: 'C-WRONG' }, [testAction]), null);
 assert.strictEqual(actionForEvent({ ...event, thread_ts: '1.000001' }, [testAction]), null);

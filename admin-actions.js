@@ -16,11 +16,12 @@ const APPROVED_ADMIN_ACTIONS = Object.freeze([
 ]);
 
 function actionForEvent(event, actions = APPROVED_ADMIN_ACTIONS) {
+  const firstLine = String(event && event.text || '').split('\n')[0].trim();
   return actions.find(action =>
     event && event.channel === action.channelId &&
     event.thread_ts === action.parentThreadTs &&
     event.user === action.authorizedUserId &&
-    String(event.text || '').trim() === action.trigger
+    firstLine === action.trigger
   ) || null;
 }
 
