@@ -34,6 +34,51 @@ async function replyInThread(channelId, threadTs, text) {
   return res.data;
 }
 
+async function threadReplies(channelId, threadTs) {
+  const res = await client().get('/conversations.replies', {
+    params: { channel: channelId, ts: threadTs, limit: 200 }
+  });
+  if (!res.data.ok) throw new Error(`Slack replies error: ${res.data.error}`);
+  return res.data.messages || [];
+}
+
+async function downloadSlackFile(fileUrl) {
+  const res = await axios.get(fileUrl, {
+    headers: { Authorization: `Bearer ${token()}` },
+    responseType: 'arraybuffer'
+  });
+  return {
+    data: Buffer.from(res.data),
+    contentType: res.headers['content-type'] || 'application/octet-stream'
+  };
+}
+
+async function uploadThreadImage(channelId, threadTs, image, options) {
+  const reservation = await client().post('/files.getUploadURLExternal', {
+    filename: options.filename,
+    length: image.length
+  });
+  if (!reservation.data.ok) {
+    throw new Error(`Slack upload reservation error: ${reservation.data.error}`);
+  }
+
+  await axios.post(reservation.data.upload_url, image, {
+    headers: { 'Content-Type': options.contentType || 'application/octet-stream' },
+    maxBodyLength: Infinity
+  });
+
+  const completed = await client().post('/files.completeUploadExternal', {
+    files: [{ id: reservation.data.file_id, title: options.title }],
+    channel_id: channelId,
+    thread_ts: threadTs,
+    initial_comment: options.message
+  });
+  if (!completed.data.ok) {
+    throw new Error(`Slack upload completion error: ${completed.data.error}`);
+  }
+  return completed.data;
+}
+
 // Posts a new top-level message to a channel (not a thread reply).
 async function postMessage(channelId, text) {
   const res = await client().post('/chat.postMessage', {
@@ -141,4 +186,13 @@ Respond with a short bullet list (2-4 bullets max) of concrete, specific finding
   return res.data.content.find(c => c.type === 'text')?.text || null;
 }
 
-module.exports = { history, replyInThread, postMessage, recoverFromReceiptImage, deepCheckMismatches };
+module.exports = {
+  history,
+  replyInThread,
+  threadReplies,
+  downloadSlackFile,
+  uploadThreadImage,
+  postMessage,
+  recoverFromReceiptImage,
+  deepCheckMismatches
+};

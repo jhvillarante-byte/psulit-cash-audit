@@ -23,9 +23,13 @@ const { reconcile } = require('./reconcile');
 const {
   history,
   postMessage,
+  threadReplies,
+  downloadSlackFile,
+  uploadThreadImage,
   recoverFromReceiptImage,
   deepCheckMismatches
 } = require('./slack');
+const { executeApprovedAdminAction } = require('./admin-actions');
 
 const { broadcast } = require('./telegram');
 
@@ -169,6 +173,25 @@ app.post(
         'message' ||
       !event.text
     ) {
+      return;
+    }
+
+    try {
+      const adminResult = await executeApprovedAdminAction(event, {
+        threadReplies,
+        downloadSlackFile,
+        uploadThreadImage
+      });
+      if (adminResult.handled) {
+        console.log(
+          adminResult.duplicate
+            ? 'Approved admin action already completed; duplicate skipped.'
+            : 'Approved admin action completed.'
+        );
+        return;
+      }
+    } catch (err) {
+      console.error('Approved admin action failed:', err.message);
       return;
     }
 

@@ -1059,13 +1059,16 @@ function buildShiftSummary({
 
   for (const correction of appliedCorrections || []) {
     lines.push(
-      `✏️ Approved opening correction — ${currencyHeading(correction.currency)}: ` +
+      '✏️ Approved opening correction'
+    );
+    lines.push(
+      `${currencyHeading(correction.currency)}: ` +
       `${moneyLabel(correction.currency, correction.originalValue)} → ` +
       `${moneyLabel(correction.currency, correction.correctedValue)}`
     );
     lines.push(
-      `_Opening ref ${correction.openingRef} · Approved by ${correction.approval.approver} · ` +
-      `Slack evidence ${correction.approval.sourceMessageTs}_`
+      `*Opening ref ${correction.openingRef} · Approved by ${correction.approval.approver} · ` +
+      `Slack evidence ${correction.approval.sourceMessageTs}*`
     );
 
     const correctedResult = (results || []).find(
