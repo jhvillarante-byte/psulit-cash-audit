@@ -193,7 +193,7 @@ function extractCurrencyBlocks(section) {
   // :flag-ph: PHP: ₱341,699.64
   if (headers.length === 0) {
     const flatLineRegex =
-      /:[\w-]+:\s*([A-Z]{3}):\s*(?:₱|\$|€|£|¥|HK\$|S\$|NT\$|A\$|C\$|SR|฿|₩)?\s*([\d,]+\.?\d*)/g;
+      /:[\w-]+:\s*([A-Z]{3}):\s*(?:₱|\$|€|£|¥|HK\$|S\$|NT\$|A\$|C\$|Rp|SR|฿|₩)?\s*([\d,]+\.?\d*)/g;
 
     let flatMatch;
 
@@ -408,6 +408,11 @@ function parseExpenseEntry(text) {
     /(?:^|\n)\s*\*?\s*category\s*:\s*\*?\s*([^\n\r*]+)/i
   );
 
+  const fundingSourceLine = matchOne(
+    String(text),
+    /(?:^|\n)\s*\*?\s*(?:fund|where was the money taken from\?)\s*:\s*\*?\s*([^\n\r*]+)/i
+  );
+
   const descriptionMatch = String(text).match(
     /(?:^|\n)\s*\*?\s*description\s*:\s*\*?\s*([\s\S]*?)(?=\n\s*\*?\s*amount\s*:|$)/i
   );
@@ -453,14 +458,19 @@ function parseExpenseEntry(text) {
     amount *= 1000;
   }
 
+  const isExplicitExpense =
+    /^\s*\*?EXPENSE\*?\s*$/im.test(String(text));
+
+  // A structured EXPENSE remains cash-out even when its description says the
+  // money was used to top up a wallet. Only a true replenishment is cash-in.
   const isTopUp =
-    /top[\s-]?up|replenish/i.test(text);
+    !isExplicitExpense && /top[\s-]?up|replenish/i.test(text);
 
   const isReceivable =
     /^receivable$/i.test(category || '');
 
   let cashMovement = null;
-  let fundingSource = null;
+  let fundingSource = fundingSourceLine || null;
 
   if (isReceivable && description) {
     // Confirmed business mapping: SMART Postpaid receivables are paid from

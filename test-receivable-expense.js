@@ -5,7 +5,7 @@ const {
   parseTransaction
 } = require('./parse');
 const { reconcile } = require('./reconcile');
-const { buildExpenseAdjustments } = require('./audit');
+const { buildExpenseAdjustments, expenseForexPhpEffect } = require('./audit');
 
 const alphalandReceivable = parseExpenseEntry(`
 Expense ID: ALP-20260907-003
@@ -185,6 +185,36 @@ Amount: ₱100,000.00
 assert.equal(replenishment.amount, 100000);
 assert.equal(replenishment.isReceivable, false);
 
+const lottomatikExpense = parseExpenseEntry(`
+*EXPENSE*
+Expense ID: ALP-20260909-001
+Category: Others — Reload on lottomatik wallet
+*Amount: 4,000.00 PHP*
+Fund: Lottomatik
+Description: Top up 4k to lottomatik account
+Posted by: Irene Maligat
+Posted at: Sep 9, 2026, 4:24:39 PM
+`);
+assert.equal(lottomatikExpense.amount, -4000, 'structured EXPENSE must remain cash-out');
+assert.equal(lottomatikExpense.fundingSource, 'Lottomatik');
+assert.equal(expenseForexPhpEffect(lottomatikExpense), 0, 'non-Forex expense must not change Forex PHP');
+
+const forexExpense = parseExpenseEntry(`
+*EXPENSE*
+Expense ID: TEST-FOREX-EXPENSE
+Category: Others
+*Amount: 4,000.00 PHP*
+Fund: Forex Drawer
+Description: Top up external account
+`);
+assert.equal(forexExpense.amount, -4000);
+assert.equal(expenseForexPhpEffect(forexExpense), -4000);
+assert.deepEqual(
+  buildExpenseAdjustments([forexExpense], expenseForexPhpEffect(forexExpense)),
+  { PHP: -4000 },
+  'one Forex expense must be applied exactly once'
+);
+
 console.log('foreign-currency receivable reconciliation: PASS');
 console.log('actual TWD NT$ cash-count format: PASS');
 console.log('Scratch-funded SMART receivable exclusion: PASS');
@@ -192,3 +222,4 @@ console.log('PHP receivable cash movement: PASS');
 console.log('ambiguous receivable review flag: PASS');
 console.log('unrelated overall discrepancy preserved: PASS');
 console.log('ordinary expense and replenishment regression: PASS');
+console.log('structured expense direction and fund scope: PASS');

@@ -444,7 +444,7 @@ function registerTestRoutes(app, BRANCHES) {
    * CORRECTED SHIFT AUDIT
    */
   app.get(
-    ['/test/corrected-shift-audit', '/test/historical-corrected-shift-audit'],
+    ['/test/corrected-shift-audit', '/test/historical-corrected-shift-audit', '/test/historical-shift-audit'],
     async (req, res) => {
       try {
         const branchConfig = byName.get((req.query.branch || '').toLowerCase());
@@ -465,7 +465,10 @@ function registerTestRoutes(app, BRANCHES) {
         if (!isScheduledOpening(opening.parsed)) return res.status(400).send(`${openingRef} is not a scheduled opening count.`);
         if (!isScheduledClosing(closing.parsed)) return res.status(400).send(`${closingRef} is not a scheduled closing count.`);
         if (parseFloat(opening.msg.ts) >= parseFloat(closing.msg.ts)) return res.status(400).send('Opening must precede closing.');
-        if (!correctionsForOpening(openingRef).length) return res.status(400).send(`No approved correction exists for ${openingRef}.`);
+        const requiresOpeningCorrection = req.path !== '/test/historical-shift-audit';
+        if (requiresOpeningCorrection && !correctionsForOpening(openingRef).length) {
+          return res.status(400).send(`No approved correction exists for ${openingRef}.`);
+        }
 
         const dryRun = req.query.dry === '1';
         const report = await runShiftAudit(
@@ -480,7 +483,10 @@ function registerTestRoutes(app, BRANCHES) {
             `Using exact closing ref ${closingRef} at ${closing.parsed.timestamp}\n\n${report}`
           );
         }
-        return res.send(`Posted corrected historical shift audit for ${branchConfig.name}.`);
+        return res.send(
+          `Posted historical shift audit for ${branchConfig.name}.` +
+          (report && report.ts ? ` Slack message ts: ${report.ts}` : '')
+        );
       } catch (err) {
         console.error('historical-corrected-shift-audit error:', err);
         return res.status(500).type('text/plain').send(`Error: ${err.message}\n\n${err.stack || ''}`);

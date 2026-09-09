@@ -66,7 +66,8 @@ const CCY_SYMBOL = {
   BND: 'B$',
   SAR: 'SR',
   THB: '฿',
-  CNY: '¥'
+  CNY: '¥',
+  IDR: 'Rp'
 };
 
 const CCY_FLAG = {
@@ -613,6 +614,15 @@ function buildExpenseAdjustments(
   return adjustments;
 }
 
+function expenseForexPhpEffect(entry) {
+  if (!entry) return 0;
+  if (entry.isReceivable) return entry.amount;
+  if (!entry.fundingSource) return entry.amount;
+  return /^forex(?:\s+drawer)?$/i.test(entry.fundingSource)
+    ? entry.amount
+    : 0;
+}
+
 /**
  * Reads natural-language PHP cash movements
  * posted in the general channel.
@@ -1095,6 +1105,14 @@ function buildShiftSummary({
 
   if ((appliedTransactionCorrections || []).length) lines.push('');
 
+  const matchedIdr = (results || []).find(result => result.ccy === 'IDR' && result.match);
+  if (matchedIdr) {
+    lines.push(
+      `✅ ${currencyHeading('IDR')} counted: expected ${moneyLabel('IDR', matchedIdr.expected)}; ` +
+      `actual ${moneyLabel('IDR', matchedIdr.actual)}.`
+    );
+  }
+
   if (
     expenseEntries.length
   ) {
@@ -1105,7 +1123,7 @@ function buildShiftSummary({
           e
         ) =>
           s +
-          e.amount,
+          (e.reconciliationAmount ?? e.amount),
 
         0
       );
@@ -1113,6 +1131,17 @@ function buildShiftSummary({
     lines.push(
       `💼 ${expenseEntries.length} expense/replenishment entr${expenseEntries.length > 1 ? 'ies' : 'y'} included (net ${total >= 0 ? '+' : '-'}${moneyLabel('PHP', Math.abs(total))}).`
     );
+
+    for (const entry of expenseEntries) {
+      if (!entry.isReceivable && entry.fundingSource &&
+          (entry.reconciliationAmount ?? entry.amount) === 0) {
+        const id = String(entry.raw || '').match(/Expense ID:\s*([^\n\r]+)/i)?.[1]?.trim() || 'Expense';
+        lines.push(
+          `ℹ️ ${id}: ${moneyLabel('PHP', Math.abs(entry.amount))} cash out from ` +
+          `${entry.fundingSource}; no Forex PHP impact.`
+        );
+      }
+    }
 
     for (const entry of expenseEntries) {
       if (!entry.isReceivable) {
@@ -1368,8 +1397,10 @@ function buildShiftMath({
             parseFloat(b.ts)
         )
       ) {
+        const effect = e.reconciliationAmount ?? e.amount;
+        if (!effect) continue;
         lines.push(
-          `${e.amount >= 0 ? '+' : '-'} ${expenseLabel(e.raw)}: ${moneyLabel('PHP', Math.abs(e.amount))}`
+          `${effect >= 0 ? '+' : '-'} ${expenseLabel(e.raw)}: ${moneyLabel('PHP', Math.abs(effect))}`
         );
       }
 
@@ -1606,11 +1637,15 @@ async function runShiftAudit(
           continue;
         }
 
+        const reconciliationAmount = expenseForexPhpEffect(parsed);
+
         expenseTotal +=
-          parsed.amount;
+          reconciliationAmount;
 
         expenseEntries.push({
           ...parsed,
+
+          reconciliationAmount,
 
           raw:
             text,
@@ -1820,6 +1855,8 @@ async function runShiftAudit(
           )
       );
     }
+
+    return posted;
 
   } catch (err) {
     console.error(
@@ -2385,6 +2422,7 @@ module.exports = {
   runShiftAudit,
   runCloseVsOpenCheck,
   buildExpenseAdjustments,
+  expenseForexPhpEffect,
   currencyHeading,
   isScheduledOpening,
   isScheduledClosing
