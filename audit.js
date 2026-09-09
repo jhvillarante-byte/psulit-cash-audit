@@ -10,8 +10,8 @@
  * accidentally excluding/including transactions.
  */
 
-const { reconcile } = require('./reconcile');
-const { applyApprovedOpeningCorrections } = require('./corrections');
+const { applyApprovedOpeningCorrections, applyApprovedTransactionCorrections } = require('./corrections');
+const { reconcile, transactionPhpEffect } = require('./reconcile');
 
 const {
   history,
@@ -766,33 +766,6 @@ function parseForexFundMovement(
   return null;
 }
 
-function transactionPhpEffect(
-  tx
-) {
-  if (
-    !tx ||
-    tx.phpAmount ==
-      null
-  ) {
-    return 0;
-  }
-
-  const first =
-    (
-      tx.movements ||
-      []
-    )[0];
-
-  if (!first) {
-    return 0;
-  }
-
-  return first.action ===
-    'BUY'
-      ? -tx.phpAmount
-      : tx.phpAmount;
-}
-
 function transactionEffectForCurrency(
   tx,
   ccy
@@ -1025,6 +998,7 @@ function buildShiftSummary({
   expenseEntries,
   cashMovementEntries,
   appliedCorrections,
+  appliedTransactionCorrections,
   results,
   stillOpen,
   resolved,
@@ -1092,6 +1066,34 @@ function buildShiftSummary({
   }
 
   if ((appliedCorrections || []).length) lines.push('');
+
+  for (const correction of appliedTransactionCorrections || []) {
+    lines.push('✏️ Approved transaction correction');
+    lines.push(
+      `${currencyHeading(correction.currency)} · AR ${String(correction.transactionRef).padStart(7, '0')}: ` +
+      `${correction.originalDirection} ${correction.amount.toLocaleString('en-US')} → ` +
+      `${correction.correctedDirection} ${correction.amount.toLocaleString('en-US')}`
+    );
+    lines.push(
+      `*Original receipt preserved · Approved by ${correction.approval.approver} · ` +
+      `Slack evidence ${correction.approval.sourceMessageTs}*`
+    );
+    const correctedResult = (results || []).find(result => result.ccy === correction.currency);
+    if (correctedResult && correctedResult.match) {
+      const openingAmount = correctedResult.openingAmount || 0;
+      const movementTerms = tickets
+        .map(ticket => transactionEffectForCurrency(ticket.parsed, correction.currency))
+        .filter(effect => effect !== 0)
+        .map(effect => `${effect > 0 ? '+' : '−'} ${moneyLabel(correction.currency, Math.abs(effect))}`);
+      lines.push(
+        `✅ ${currencyHeading(correction.currency)} reconciled: ` +
+        `${moneyLabel(correction.currency, openingAmount)} ` +
+        `${movementTerms.join(' ')} = ${moneyLabel(correction.currency, correctedResult.actual)}.`
+      );
+    }
+  }
+
+  if ((appliedTransactionCorrections || []).length) lines.push('');
 
   if (
     expenseEntries.length
@@ -1516,20 +1518,17 @@ async function runShiftAudit(
               m.text
             )
         )
-        .map(
-          m => ({
-            parsed:
-              parseTransaction(
-                m.text
-              ),
-
-            raw:
-              m.text,
-
-            ts:
-              m.ts
-          })
-        )
+        .map(m => {
+          const originalParsed = parseTransaction(m.text);
+          const correctionResult = applyApprovedTransactionCorrections(originalParsed);
+          return {
+            parsed: correctionResult.effectiveTransaction,
+            originalParsed,
+            appliedTransactionCorrections: correctionResult.applied,
+            raw: m.text,
+            ts: m.ts
+          };
+        })
         .filter(
           t =>
             t.parsed
@@ -1678,6 +1677,10 @@ async function runShiftAudit(
         openingCount
       );
 
+    const appliedTransactionCorrections = tickets.flatMap(
+      ticket => ticket.appliedTransactionCorrections || []
+    );
+
     const openingTotals =
       stripUntracked({
         ...correctionResult.effectiveTotals,
@@ -1770,6 +1773,7 @@ async function runShiftAudit(
         cashMovementEntries,
         appliedCorrections:
           correctionResult.applied,
+        appliedTransactionCorrections,
         results,
         stillOpen,
         resolved,

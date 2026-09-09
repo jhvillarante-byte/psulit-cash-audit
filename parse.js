@@ -296,8 +296,10 @@ function parseTransaction(text) {
 
   const movements = [];
 
+  // Keep each line's PHP settlement with its own BUY/SELL direction. This is
+  // required for wholesale tickets containing more than one direction.
   const lineRegex =
-    /\b(BUY|SELL)\s*([\d,]+)\s*([A-Z]{3})\b/gi;
+    /\b(BUY|SELL)\s*([\d,]+(?:\.\d+)?)\s*([A-Z]{3})\b(?:\s*@\s*([\d,]+(?:\.\d+)?))?(?:\s*(?:→|->)\s*₱\s*([\d,]+(?:\.\d+)?))?/gi;
 
   let m;
 
@@ -307,7 +309,9 @@ function parseTransaction(text) {
       ccy: m[3].toUpperCase(),
       fcyAmount: parseFloat(
         m[2].replace(/,/g, '')
-      )
+      ),
+      rate: m[4] == null ? null : parseFloat(m[4].replace(/,/g, '')),
+      phpAmount: m[5] == null ? null : parseFloat(m[5].replace(/,/g, ''))
     });
   }
 

@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test-receivable-expense.js && node test-corrections.js && node test-admin-actions.js"
+    "test": "node test-receivable-expense.js && node test-corrections.js && node test-transaction-corrections.js && node test-admin-actions.js"
   },
   "dependencies": {
     "express": "^4.19.2",

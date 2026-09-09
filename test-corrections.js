@@ -88,11 +88,16 @@ parse.parseTransaction = text => {
   if (ref === '1622') movements.push({ action: 'BUY', ccy: 'EUR', fcyAmount: 300 });
   if (ref === '1627') movements.push({ action: 'BUY', ccy: 'CAD', fcyAmount: 1000 });
   if (ref === '1630') {
-    movements.push({ action: 'SELL', ccy: 'EUR', fcyAmount: 555 });
-    movements.push({ action: 'BUY', ccy: 'CAD', fcyAmount: 1150 });
+    movements.push({ action: 'SELL', ccy: 'EUR', fcyAmount: 555, phpAmount: 401540.30 });
+    movements.push({ action: 'BUY', ccy: 'CAD', fcyAmount: 1150, phpAmount: 51474.00 });
   }
   if (!movements.length) movements.push({ action: php[0], ccy: 'USD', fcyAmount: 0 });
-  return { ref, movements, phpAmount: php[1], raw: text };
+  return {
+    ref,
+    movements,
+    phpAmount: php[1],
+    raw: ref === '1630' ? 'AR 0001630 — 09/08/2026 — CZARINA' : text
+  };
 };
 
 slack.history = async (channelId, options = {}) => {
@@ -148,9 +153,11 @@ for (const [currency, flag] of Object.entries(supportedFlags)) {
   assert(first.includes('*Opening ref PSC-MTS2WZJV-9LGR · Approved by Corporate Psulit · Slack evidence 1788908073.626909*'));
   assert(first.includes('✅ 🇪🇺 EUR reconciled: €255.00 + €300.00 − €555.00 = €0.00.'));
   assert(!first.includes('❗ 🇪🇺 EUR:'), 'EUR must reconcile after 255 + 300 - 555 = 0');
-  assert(first.includes('❗ 🇨🇦 CAD: expected C$2,300.00, but missing from closing count'), 'CAD discrepancy must remain independent');
+  assert(!first.includes('❗ 🇨🇦 CAD:'), 'corrected CAD must reconcile at zero');
+  assert(first.includes('✏️ Approved transaction correction'));
+  assert(first.includes('🇨🇦 CAD · AR 0001630: BUY 1,150 → SELL 1,150'));
+  assert(first.includes('✅ 🇨🇦 CAD reconciled: C$150.00 + C$1,000.00 − C$1,150.00 = C$0.00.'));
   assert(first.includes('❗ 🇵🇭 PHP: short ₱100,000.00'), 'PHP discrepancy must remain independent');
-  assert(first.includes('*🇨🇦 CAD*'), 'full math must use the correct CAD flag');
   assert(first.includes('*🇵🇭 PHP*'), 'full math must use the correct PHP flag');
   assert.strictEqual(opening.totals.EUR, 235, 'reruns must not mutate the original count');
 
