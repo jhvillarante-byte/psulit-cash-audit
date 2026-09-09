@@ -9,6 +9,7 @@ const APPROVED_ADMIN_ACTIONS = Object.freeze([
     authorizedUserId: 'U0B8SV8CG9L',
     channelId: 'C0B734364T0',
     parentThreadTs: '1788925450.692769',
+    sourceFileId: 'F0C0D4T1ZB7',
     imageSha256: '16c99ff9d471fa42ef4d2c7cb078b0b4ab08a30d67b801cae99f2a482a1de2c0',
     message: 'Ate Tina, please correct the 1,150 CAD entry from BUY to SELL. Since we sold the CAD to Czarina, the correct entry should be SELL. Please reply in the app with the corrected entry.'
   })
@@ -27,9 +28,15 @@ async function executeApprovedAdminAction(event, deps, actions = APPROVED_ADMIN_
   const action = actionForEvent(event, actions);
   if (!action) return { handled: false };
 
-  const files = (event.files || []).filter(file =>
+  let files = (event.files || []).filter(file =>
     String(file.mimetype || '').startsWith('image/') && file.url_private_download
   );
+  if (!files.length && action.sourceFileId) {
+    const approvedFile = await deps.slackFileInfo(action.sourceFileId);
+    files = [approvedFile].filter(file =>
+      String(file.mimetype || '').startsWith('image/') && file.url_private_download
+    );
+  }
   if (files.length !== 1) {
     throw new Error('Approved admin action requires exactly one image attachment');
   }

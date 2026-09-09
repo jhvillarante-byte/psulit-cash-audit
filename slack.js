@@ -53,6 +53,12 @@ async function downloadSlackFile(fileUrl) {
   };
 }
 
+async function slackFileInfo(fileId) {
+  const res = await client().get('/files.info', { params: { file: fileId } });
+  if (!res.data.ok) throw new Error(`Slack file info error: ${res.data.error}`);
+  return res.data.file;
+}
+
 async function uploadThreadImage(channelId, threadTs, image, options) {
   const reservation = await client().post('/files.getUploadURLExternal', {
     filename: options.filename,
@@ -191,6 +197,7 @@ module.exports = {
   replyInThread,
   threadReplies,
   downloadSlackFile,
+  slackFileInfo,
   uploadThreadImage,
   postMessage,
   recoverFromReceiptImage,

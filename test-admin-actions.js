@@ -36,6 +36,7 @@ assert.strictEqual(actionForEvent({ ...event, text: 'post something else' }, [te
   let uploads = 0;
   const deps = {
     threadReplies: async () => [],
+    slackFileInfo: async () => event.files[0],
     downloadSlackFile: async () => ({ data: image, contentType: 'image/jpeg' }),
     uploadThreadImage: async (channel, thread, data, options) => {
       uploads++;
@@ -68,9 +69,18 @@ assert.strictEqual(actionForEvent({ ...event, text: 'post something else' }, [te
     /does not match/
   );
   await assert.rejects(
-    executeApprovedAdminAction({ ...event, files: [] }, deps, [testAction]),
+    executeApprovedAdminAction(
+      { ...event, files: [] },
+      { ...deps, slackFileInfo: async () => ({ mimetype: 'text/plain' }) },
+      [testAction]
+    ),
     /exactly one image/
   );
+
+  const referencedFile = await executeApprovedAdminAction(
+    { ...event, files: [] }, deps, [testAction]
+  );
+  assert.strictEqual(referencedFile.handled, true);
 
   console.log('approved admin action authentication, image, and duplicate tests: PASS');
 })().catch(error => {

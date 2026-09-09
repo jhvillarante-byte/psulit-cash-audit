@@ -25,6 +25,7 @@ const {
   postMessage,
   threadReplies,
   downloadSlackFile,
+  slackFileInfo,
   uploadThreadImage,
   recoverFromReceiptImage,
   deepCheckMismatches
@@ -180,6 +181,7 @@ app.post(
       const adminResult = await executeApprovedAdminAction(event, {
         threadReplies,
         downloadSlackFile,
+        slackFileInfo,
         uploadThreadImage
       });
       if (adminResult.handled) {
