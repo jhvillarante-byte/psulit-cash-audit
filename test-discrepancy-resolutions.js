@@ -78,7 +78,7 @@ const actionPayload = { type: 'block_actions', user: { id: 'U-MANAGER' }, channe
     } }
   }, { refCode: 'PSC-NEXT-OPEN', totals: { PHP: 205832.18 } }, {
     channel: 'C-ALPHALAND', parentTs: '123.457',
-    parentText: 'Alphaland HANDOVER CHECK'
+    parentText: '🔄 Alphaland — 09/12/2026, Close 8:38 PM → Open 10:07 AM'
   });
   assert.strictEqual(legacyHandoverCorrection.cashCountRef, 'PSC-NEXT-OPEN');
   assert.strictEqual(legacyHandoverCorrection.correctedValue, 200832.18);

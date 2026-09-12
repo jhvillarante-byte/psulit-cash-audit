@@ -72,7 +72,7 @@ function correctionFromResolution(reply, lockedCount, context = {}) {
   const payload = reply?.metadata?.event_payload;
   if (reply?.metadata?.event_type !== RESOLUTION_EVENT ||
       payload?.reason !== 'Cash count encoding error') return null;
-  const legacyTargetRef = /HANDOVER CHECK/i.test(context.parentText || '')
+  const legacyTargetRef = /HANDOVER CHECK|🔄|\bClose\b[\s\S]*→[\s\S]*\bOpen\b/i.test(context.parentText || '')
     ? payload.opening_ref
     : payload.closing_ref;
   const targetRef = payload.affected_ref || legacyTargetRef;

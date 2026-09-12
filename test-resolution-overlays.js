@@ -58,7 +58,7 @@ console.log('duplicate overlay protection: PASS');
 // corrected closing forward as the next same-day shift's effective opening.
 const slack = require('./slack');
 slack.history = async () => [{
-  ts: '199.001', reply_count: 1, text: 'Alphaland HANDOVER CHECK'
+  ts: '199.001', reply_count: 1, text: '🔄 Alphaland — 09/12/2026, Close 8:38 PM → Open 10:07 AM'
 }];
 slack.threadReplies = async () => [{
   ...formal('PHP', 200832.18, '200.001'),
