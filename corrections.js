@@ -116,14 +116,14 @@ function applyApprovedTransactionCorrections(transaction, corrections = APPROVED
 }
 
 function correctionKey(correction) {
-  return `${correction.openingRef}|${correction.currency}`;
+  return `${correction.cashCountRef || correction.openingRef}|${correction.currency}`;
 }
 
 function isExplicitlyApproved(correction) {
   const approval = correction && correction.approval;
   const evidence = correction && correction.evidence;
   return !!(
-    correction && correction.id && correction.openingRef &&
+    correction && correction.id && (correction.cashCountRef || correction.openingRef) &&
     /^[A-Z]{3}$/.test(correction.currency || '') &&
     Number.isFinite(correction.originalValue) &&
     Number.isFinite(correction.correctedValue) &&
@@ -159,7 +159,9 @@ function buildCorrectionRegistry(corrections = APPROVED_CORRECTIONS) {
 
 function correctionsForOpening(openingRef, corrections = APPROVED_CORRECTIONS) {
   const registry = buildCorrectionRegistry(corrections);
-  return [...registry.values()].filter(correction => correction.openingRef === openingRef);
+  return [...registry.values()].filter(
+    correction => (correction.cashCountRef || correction.openingRef) === openingRef
+  );
 }
 
 function applyApprovedOpeningCorrections(openingCount, corrections = APPROVED_CORRECTIONS) {
@@ -169,7 +171,7 @@ function applyApprovedOpeningCorrections(openingCount, corrections = APPROVED_CO
   for (const correction of correctionsForOpening(openingCount && openingCount.refCode, corrections)) {
     const recorded = effectiveTotals[correction.currency];
     if (!Number.isFinite(recorded) || Math.abs(recorded - correction.originalValue) > 0.01) {
-      throw new Error(`Approved correction original value mismatch for ${correction.openingRef} ${correction.currency}`);
+      throw new Error(`Approved correction original value mismatch for ${correction.cashCountRef || correction.openingRef} ${correction.currency}`);
     }
     effectiveTotals[correction.currency] = correction.correctedValue;
     applied.push(correction);

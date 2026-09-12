@@ -56,6 +56,52 @@ function resolutionFromReplies(replies, key) {
   return replies.find(reply => reply.metadata?.event_type === RESOLUTION_EVENT && reply.metadata?.event_payload?.resolution_key === key) || null;
 }
 
+function parseConfirmedBalance(text) {
+  const patterns = [
+    /(?:[A-Z]{3}\s+)?actual\s+(?:cash\s+)?confirmed\s*:\s*(?:PHP\s*)?(?:[₱$€£¥]|NT\$|C\$|A\$|S\$)?\s*([\d,]+(?:\.\d+)?)/i,
+    /correct(?:ed)?\s+(?:balance|value|amount)\s*(?:was|is|:)\s*(?:[A-Z]{3}\s*)?(?:[₱$€£¥]|NT\$|C\$|A\$|S\$)?\s*([\d,]+(?:\.\d+)?)/i
+  ];
+  for (const pattern of patterns) {
+    const match = String(text || '').match(pattern);
+    if (match) return Number(match[1].replace(/,/g, ''));
+  }
+  return null;
+}
+
+function correctionFromResolution(reply, lockedCount, context = {}) {
+  const payload = reply?.metadata?.event_payload;
+  if (reply?.metadata?.event_type !== RESOLUTION_EVENT ||
+      payload?.reason !== 'Cash count encoding error') return null;
+  const targetRef = payload.affected_ref || payload.closing_ref;
+  if (!targetRef || targetRef !== lockedCount?.refCode ||
+      !/^[A-Z]{3}$/.test(payload.currency || '')) return null;
+  const correctedValue = payload.corrected_value != null && Number.isFinite(Number(payload.corrected_value))
+    ? Number(payload.corrected_value)
+    : parseConfirmedBalance(reply.text);
+  const originalValue = lockedCount?.totals?.[payload.currency] ?? lockedCount?.others?.[payload.currency];
+  if (!Number.isFinite(correctedValue) || !Number.isFinite(originalValue)) return null;
+  return {
+    id: `resolution:${reply.ts || payload.resolved_at}:${targetRef}:${payload.currency}`,
+    cashCountRef: targetRef,
+    openingRef: targetRef,
+    currency: payload.currency,
+    originalValue,
+    correctedValue,
+    resolutionOverlay: true,
+    evidence: {
+      teller: 'Formal discrepancy resolution',
+      sourceChannelId: payload.channel || context.channel || '',
+      sourceThreadTs: payload.parent_ts || context.parentTs || '',
+      sourceMessageTs: reply.ts || payload.resolved_at
+    },
+    approval: {
+      status: 'approved', approver: payload.resolver,
+      approverRole: 'management', sourceChannelId: payload.channel || context.channel || '',
+      sourceThreadTs: payload.parent_ts || context.parentTs || '', sourceMessageTs: reply.ts || payload.resolved_at
+    }
+  };
+}
+
 function modal(details) {
   return {
     type: 'modal', callback_id: CALLBACK_ID,
@@ -74,6 +120,19 @@ function modal(details) {
       {
         type: 'input', block_id: 'notes', optional: true, label: { type: 'plain_text', text: 'Notes' },
         element: { type: 'plain_text_input', action_id: 'value', multiline: true, max_length: 1000 }
+      },
+      {
+        type: 'input', block_id: 'affected_count', optional: true,
+        label: { type: 'plain_text', text: 'Affected cash count (encoding errors)' },
+        element: { type: 'static_select', action_id: 'value', options: [
+          { text: { type: 'plain_text', text: 'Opening' }, value: 'opening' },
+          { text: { type: 'plain_text', text: 'Closing' }, value: 'closing' }
+        ] }
+      },
+      {
+        type: 'input', block_id: 'corrected_balance', optional: true,
+        label: { type: 'plain_text', text: 'Confirmed corrected balance' },
+        element: { type: 'plain_text_input', action_id: 'value' }
       }
     ]
   };
@@ -122,6 +181,13 @@ function createResolutionWorkflow({ threadReplies, openView, postEphemeral, post
     const reason = payload.view?.state?.values?.reason?.value?.selected_option?.value;
     const notes = String(payload.view?.state?.values?.notes?.value?.value || '').trim();
     if (!REASONS.includes(reason)) throw new Error('Invalid discrepancy resolution reason.');
+    const affectedSide = payload.view?.state?.values?.affected_count?.value?.selected_option?.value || null;
+    const correctedRaw = String(payload.view?.state?.values?.corrected_balance?.value?.value || '').replace(/,/g, '').trim();
+    const correctedValue = correctedRaw === '' ? null : Number(correctedRaw);
+    if (reason === 'Cash count encoding error' &&
+        (!['opening', 'closing'].includes(affectedSide) || !Number.isFinite(correctedValue) || correctedValue < 0)) {
+      throw new Error('Cash count encoding corrections require the affected count and confirmed corrected balance.');
+    }
     const key = resolutionKey(details);
     const existing = resolutionFromReplies(await threadReplies(details.channel, details.parentTs), key);
     if (existing) {
@@ -133,7 +199,7 @@ function createResolutionWorkflow({ threadReplies, openView, postEphemeral, post
     const text = formatResolution({ reason, notes, userId, resolvedAt });
     const posted = await postResolution(details.channel, details.parentTs, text, {
       clientMsgId: uuidFor(key),
-      metadata: { event_type: RESOLUTION_EVENT, event_payload: { resolution_key: key, branch: details.branch, opening_ref: details.openingRef, closing_ref: details.closingRef, currency: details.currency, amount: String(details.amount), reason, resolver: userId, resolved_at: resolvedInstant.toISOString() } }
+      metadata: { event_type: RESOLUTION_EVENT, event_payload: { resolution_key: key, branch: details.branch, channel: details.channel, parent_ts: details.parentTs, opening_ref: details.openingRef, closing_ref: details.closingRef, affected_side: affectedSide, affected_ref: affectedSide === 'opening' ? details.openingRef : affectedSide === 'closing' ? details.closingRef : null, currency: details.currency, amount: String(details.amount), corrected_value: correctedValue == null ? null : String(correctedValue), reason, resolver: userId, resolved_at: resolvedInstant.toISOString() } }
     });
     return { posted };
   }
@@ -141,4 +207,4 @@ function createResolutionWorkflow({ threadReplies, openView, postEphemeral, post
   return { blockAction, viewSubmission };
 }
 
-module.exports = { ACTION_ID, CALLBACK_ID, REASONS, RESOLUTION_EVENT, createResolutionWorkflow, formatResolution, reportBlocks, resolutionKey, resolutionFromReplies };
+module.exports = { ACTION_ID, CALLBACK_ID, REASONS, RESOLUTION_EVENT, correctionFromResolution, createResolutionWorkflow, formatResolution, parseConfirmedBalance, reportBlocks, resolutionKey, resolutionFromReplies };

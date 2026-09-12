@@ -10,14 +10,15 @@
  * accidentally excluding/including transactions.
  */
 
-const { applyApprovedOpeningCorrections, applyApprovedTransactionCorrections } = require('./corrections');
+const { APPROVED_CORRECTIONS, applyApprovedOpeningCorrections, applyApprovedTransactionCorrections } = require('./corrections');
 const { reconcile, transactionPhpEffect } = require('./reconcile');
-const { reportBlocks } = require('./discrepancy-resolutions');
+const { correctionFromResolution, reportBlocks } = require('./discrepancy-resolutions');
 
 const {
   history,
   postMessage,
-  replyInThread
+  replyInThread,
+  threadReplies
 } = require('./slack');
 
 const {
@@ -185,6 +186,39 @@ function stripUntracked(totals) {
   }
 
   return copy;
+}
+
+async function resolutionOverlaysForCounts(channelId, counts) {
+  const wanted = new Map(counts.filter(Boolean).map(count => [count.refCode, count]));
+  if (!wanted.size) return [];
+  const overlays = new Map();
+  let latest;
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const messages = await history(channelId, { latest, limit: PAGE_SIZE });
+    if (!messages.length) break;
+    for (const parent of messages) {
+      if (!parent.reply_count && !/SHIFT AUDIT|HANDOVER CHECK/i.test(parent.text || '')) continue;
+      const replies = await threadReplies(channelId, parent.ts);
+      for (const reply of replies) {
+        for (const count of wanted.values()) {
+          const correction = correctionFromResolution(reply, count, {
+            channel: channelId,
+            parentTs: parent.ts
+          });
+          if (!correction) continue;
+          const key = `${correction.cashCountRef}|${correction.currency}`;
+          const existing = overlays.get(key);
+          if (existing && (existing.correctedValue !== correction.correctedValue || existing.id !== correction.id)) {
+            throw new Error(`Conflicting formal resolution overlays for ${key}`);
+          }
+          overlays.set(key, correction);
+        }
+      }
+    }
+    if (messages.length < PAGE_SIZE) break;
+    latest = (parseFloat(messages[messages.length - 1].ts) - 0.000001).toFixed(6);
+  }
+  return [...overlays.values()];
 }
 
 function sameDateParts(a, b) {
@@ -1051,6 +1085,11 @@ function buildShiftSummary({
       `${moneyLabel(correction.currency, correction.originalValue)} → ` +
       `${moneyLabel(correction.currency, correction.correctedValue)}`
     );
+    if (correction.resolutionOverlay) {
+      lines.push(`Opening record: ${moneyLabel(correction.currency, correction.originalValue)}`);
+      lines.push(`Resolved correction: ${moneyLabel(correction.currency, correction.correctedValue)}`);
+      lines.push(`Effective opening used: ${moneyLabel(correction.currency, correction.correctedValue)}`);
+    }
     lines.push(
       `*Opening ref ${correction.openingRef} · Approved by ${correction.approval.approver} · ` +
       `Slack evidence ${correction.approval.sourceMessageTs}*`
@@ -1708,10 +1747,16 @@ async function runShiftAudit(
         0
       );
 
+    const resolutionCorrections = await resolutionOverlaysForCounts(
+      cashCountChannelId, [openingCount, closingCount]
+    );
+    const allCorrections = [...APPROVED_CORRECTIONS, ...resolutionCorrections];
     const correctionResult =
       applyApprovedOpeningCorrections(
-        openingCount
+        openingCount,
+        allCorrections
       );
+    const closingCorrectionResult = applyApprovedOpeningCorrections(closingCount, allCorrections);
 
     const appliedTransactionCorrections = tickets.flatMap(
       ticket => ticket.appliedTransactionCorrections || []
@@ -1725,7 +1770,7 @@ async function runShiftAudit(
 
     const closingTotals =
       stripUntracked({
-        ...closingCount.totals,
+        ...closingCorrectionResult.effectiveTotals,
         ...closingCount.others
       });
 
@@ -2083,15 +2128,22 @@ async function runCloseVsOpenCheck(
         )
         .filter(Boolean);
 
+    const handoverResolutionCorrections = await resolutionOverlaysForCounts(
+      cashCountChannelId, [closingCount, openingCount]
+    );
+    const handoverCorrections = [...APPROVED_CORRECTIONS, ...handoverResolutionCorrections];
+    const effectiveClosing = applyApprovedOpeningCorrections(closingCount, handoverCorrections);
+    const effectiveOpening = applyApprovedOpeningCorrections(openingCount, handoverCorrections);
+
     const closingTotals =
       stripUntracked({
-        ...closingCount.totals,
+        ...effectiveClosing.effectiveTotals,
         ...closingCount.others
       });
 
     const openingTotals =
       stripUntracked({
-        ...openingCount.totals,
+        ...effectiveOpening.effectiveTotals,
         ...openingCount.others
       });
 
@@ -2447,6 +2499,7 @@ module.exports = {
   buildExpenseAdjustments,
   expenseForexPhpEffect,
   currencyHeading,
+  resolutionOverlaysForCounts,
   isScheduledOpening,
   isScheduledClosing
 };

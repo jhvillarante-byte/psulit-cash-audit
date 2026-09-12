@@ -1,5 +1,5 @@
 const assert = require('assert');
-const { ACTION_ID, RESOLUTION_EVENT, createResolutionWorkflow, formatResolution, reportBlocks, resolutionKey } = require('./discrepancy-resolutions');
+const { ACTION_ID, RESOLUTION_EVENT, correctionFromResolution, createResolutionWorkflow, formatResolution, parseConfirmedBalance, reportBlocks, resolutionKey } = require('./discrepancy-resolutions');
 
 const details = { channel: 'C-ALPHALAND', branch: 'Alphaland', openingRef: 'PSC-OPEN', closingRef: 'PSC-CLOSE', currency: 'PHP', amount: 5000, direction: 'EXTRA' };
 const env = { BRANCHES: 'Alphaland:C-ALPHALAND:TX:HIVE:EXP', SLACK_MANAGER_USER_IDS: 'U-MANAGER' };
@@ -26,7 +26,9 @@ const actionPayload = { type: 'block_actions', user: { id: 'U-MANAGER' }, channe
 
   const submission = { type: 'view_submission', user: { id: 'U-MANAGER' }, view: { private_metadata: opened[0].view.private_metadata, state: { values: {
     reason: { value: { selected_option: { value: 'Cash count encoding error' } } },
-    notes: { value: { value: 'Actual PHP confirmed: ₱200,832.18.' } }
+    notes: { value: { value: 'PHP actual confirmed: ₱200,832.18.' } },
+    affected_count: { value: { selected_option: { value: 'closing' } } },
+    corrected_balance: { value: { value: '200,832.18' } }
   } } } };
   await workflow.viewSubmission(submission);
   assert.strictEqual(posted.length, 1);
@@ -36,6 +38,8 @@ const actionPayload = { type: 'block_actions', user: { id: 'U-MANAGER' }, channe
   assert.strictEqual(posted[0].metadata.event_payload.opening_ref, 'PSC-OPEN');
   assert.strictEqual(posted[0].metadata.event_payload.closing_ref, 'PSC-CLOSE');
   assert.strictEqual(posted[0].metadata.event_payload.amount, '5000');
+  assert.strictEqual(posted[0].metadata.event_payload.affected_ref, 'PSC-CLOSE');
+  assert.strictEqual(posted[0].metadata.event_payload.corrected_value, '200832.18');
   assert.match(posted[0].clientMsgId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
 
   await workflow.viewSubmission(submission);
@@ -52,6 +56,19 @@ const actionPayload = { type: 'block_actions', user: { id: 'U-MANAGER' }, channe
   assert.notStrictEqual(resolutionKey({ ...details, parentTs: '123.456' }), resolutionKey({ ...twd, parentTs: '123.456' }));
   const sample = formatResolution({ reason: 'Cash count encoding error', notes: 'Previous closing was TWD 1,000; confirmed balance was TWD 500.', userId: 'U-MANAGER', resolvedAt: 'Sep 12, 2026, 1:00:00 PM' });
   assert(sample.includes('Resolved by: <@U-MANAGER>'));
+  assert.strictEqual(parseConfirmedBalance('PHP actual confirmed: ₱200,832.18.'), 200832.18);
+  assert.strictEqual(parseConfirmedBalance('Correct balance was TWD 500'), 500);
+  const legacyCorrection = correctionFromResolution({
+    ts: '124.000', text: 'Notes: PHP actual confirmed: ₱200,832.18.',
+    metadata: { event_type: RESOLUTION_EVENT, event_payload: {
+      reason: 'Cash count encoding error', closing_ref: 'PSC-CLOSE',
+      currency: 'PHP', resolver: 'U-MANAGER', resolved_at: '2026-09-12T05:00:00.000Z'
+    } }
+  }, { refCode: 'PSC-CLOSE', totals: { PHP: 205832.18 } }, {
+    channel: 'C-ALPHALAND', parentTs: '123.456'
+  });
+  assert.strictEqual(legacyCorrection.originalValue, 205832.18);
+  assert.strictEqual(legacyCorrection.correctedValue, 200832.18);
   console.log('discrepancy resolution authorization: PASS');
   console.log('immutable Slack resolution event: PASS');
   console.log('duplicate resolution prevention: PASS');
