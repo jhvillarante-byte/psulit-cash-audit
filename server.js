@@ -27,10 +27,14 @@ const {
   downloadSlackFile,
   slackFileInfo,
   uploadThreadImage,
+  openView,
+  postEphemeral,
+  postResolution,
   recoverFromReceiptImage,
   deepCheckMismatches
 } = require('./slack');
 const { executeApprovedAdminAction } = require('./admin-actions');
+const { CALLBACK_ID, createResolutionWorkflow } = require('./discrepancy-resolutions');
 
 const { broadcast } = require('./telegram');
 
@@ -130,6 +134,50 @@ app.use(
       }
   })
 );
+
+app.use(
+  express.urlencoded({
+    extended: false,
+    verify: (req, res, buf) => { req.rawBody = buf; }
+  })
+);
+
+const discrepancyResolutionWorkflow = createResolutionWorkflow({
+  threadReplies,
+  openView,
+  postEphemeral,
+  postResolution
+});
+
+app.post('/slack/interactions', async (req, res) => {
+  if (!verifySlackSignature(req)) return res.status(401).send('invalid signature');
+  let payload;
+  try {
+    payload = JSON.parse(req.body?.payload || '{}');
+  } catch (err) {
+    return res.status(400).send('invalid payload');
+  }
+
+  if (payload.type === 'block_actions') {
+    try {
+      await discrepancyResolutionWorkflow.blockAction(payload);
+      return res.status(200).send();
+    } catch (err) {
+      console.error('Resolve discrepancy action failed:', err.message);
+      return res.status(200).send();
+    }
+  }
+
+  if (payload.type === 'view_submission' && payload.view?.callback_id === CALLBACK_ID) {
+    res.status(200).send();
+    discrepancyResolutionWorkflow.viewSubmission(payload).catch(err =>
+      console.error('Resolve discrepancy submission failed:', err.message)
+    );
+    return;
+  }
+
+  return res.status(200).send();
+});
 
 app.post(
   '/slack/events',

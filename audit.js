@@ -12,6 +12,7 @@
 
 const { applyApprovedOpeningCorrections, applyApprovedTransactionCorrections } = require('./corrections');
 const { reconcile, transactionPhpEffect } = require('./reconcile');
+const { reportBlocks } = require('./discrepancy-resolutions');
 
 const {
   history,
@@ -1835,7 +1836,18 @@ async function runShiftAudit(
     const posted =
       await postMessage(
         cashCountChannelId,
-        report
+        report,
+        {
+          blocks: reportBlocks(report, stillOpen.map(item => ({
+            channel: cashCountChannelId,
+            branch: branchConfig.name,
+            openingRef: openingCount.refCode,
+            closingRef: closingCount.refCode,
+            currency: item.ccy,
+            amount: Math.abs(item.diff),
+            direction: item.diff < 0 ? 'SHORT' : 'EXTRA'
+          })))
+        }
       );
 
     if (
@@ -2365,7 +2377,18 @@ async function runCloseVsOpenCheck(
     const posted =
       await postMessage(
         cashCountChannelId,
-        report
+        report,
+        {
+          blocks: reportBlocks(report, stillOpen.map(item => ({
+            channel: cashCountChannelId,
+            branch: branchConfig.name,
+            openingRef: openingCount.refCode,
+            closingRef: closingCount.refCode,
+            currency: item.ccy,
+            amount: Math.abs(item.diff),
+            direction: item.diff < 0 ? 'SHORT' : 'EXTRA'
+          })))
+        }
       );
 
     if (

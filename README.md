@@ -59,10 +59,16 @@ In Slack: open the channel → channel name → scroll to the bottom of the deta
 5. Add environment variables (from `.env.example`):
    - `SLACK_BOT_TOKEN`
    - `SLACK_SIGNING_SECRET`
+   - `SLACK_MANAGER_USER_IDS` — comma-separated Slack user IDs authorized to resolve audit discrepancies
    - `BRANCHES` — e.g. `Solaire:C0B734364T0:C0XXXXXXX01,Alphaland:C0YYYYYYY00:C0YYYYYYY01`
    - `TELEGRAM_BOT_TOKEN`
    - `TELEGRAM_CHAT_IDS` — comma-separated, e.g. `111111111,222222222`
 6. Deploy. Once it's live, go back to Slack's Event Subscriptions page and save the Request URL — it should verify successfully.
+
+For discrepancy resolution buttons, enable **Interactivity & Shortcuts** in the Slack app and set its Request URL to:
+`https://YOUR-RENDER-URL.onrender.com/slack/interactions`
+
+The workflow uses the existing `chat:write` and `groups:history` scopes. It identifies the resolver with a Slack mention, so `users:read` is not required.
 
 ## Notes / limitations
 

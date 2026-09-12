@@ -36,7 +36,7 @@ async function replyInThread(channelId, threadTs, text) {
 
 async function threadReplies(channelId, threadTs) {
   const res = await client().get('/conversations.replies', {
-    params: { channel: channelId, ts: threadTs, limit: 200 }
+    params: { channel: channelId, ts: threadTs, limit: 200, include_all_metadata: true }
   });
   if (!res.data.ok) throw new Error(`Slack replies error: ${res.data.error}`);
   return res.data.messages || [];
@@ -86,13 +86,36 @@ async function uploadThreadImage(channelId, threadTs, image, options) {
 }
 
 // Posts a new top-level message to a channel (not a thread reply).
-async function postMessage(channelId, text) {
+async function postMessage(channelId, text, options = {}) {
   const res = await client().post('/chat.postMessage', {
     channel: channelId,
     text,
+    ...(options.blocks ? { blocks: options.blocks } : {}),
     unfurl_links: false
   });
   if (!res.data.ok) throw new Error(`Slack postMessage error: ${res.data.error}`);
+  return res.data;
+}
+
+async function openView(triggerId, view) {
+  const res = await client().post('/views.open', { trigger_id: triggerId, view });
+  if (!res.data.ok) throw new Error(`Slack views.open error: ${res.data.error}`);
+  return res.data;
+}
+
+async function postEphemeral(channelId, userId, text) {
+  const res = await client().post('/chat.postEphemeral', { channel: channelId, user: userId, text });
+  if (!res.data.ok) throw new Error(`Slack postEphemeral error: ${res.data.error}`);
+  return res.data;
+}
+
+async function postResolution(channelId, threadTs, text, options = {}) {
+  const res = await client().post('/chat.postMessage', {
+    channel: channelId, thread_ts: threadTs, text, unfurl_links: false,
+    client_msg_id: options.clientMsgId,
+    metadata: options.metadata
+  });
+  if (!res.data.ok) throw new Error(`Slack resolution post error: ${res.data.error}`);
   return res.data;
 }
 
@@ -200,6 +223,9 @@ module.exports = {
   slackFileInfo,
   uploadThreadImage,
   postMessage,
+  openView,
+  postEphemeral,
+  postResolution,
   recoverFromReceiptImage,
   deepCheckMismatches
 };
