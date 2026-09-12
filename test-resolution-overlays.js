@@ -58,9 +58,19 @@ console.log('duplicate overlay protection: PASS');
 // corrected closing forward as the next same-day shift's effective opening.
 const slack = require('./slack');
 slack.history = async () => [{
-  ts: '199.001', reply_count: 1, text: 'Alphaland SHIFT AUDIT'
+  ts: '199.001', reply_count: 1, text: 'Alphaland HANDOVER CHECK'
 }];
-slack.threadReplies = async () => [formal('PHP', 200832.18, '200.001')];
+slack.threadReplies = async () => [{
+  ...formal('PHP', 200832.18, '200.001'),
+  metadata: { event_type: RESOLUTION_EVENT, event_payload: {
+    reason: 'Cash count encoding error',
+    opening_ref: lockedPriorClosing.refCode,
+    closing_ref: 'PSC-EARLIER-CLOSE',
+    currency: 'PHP', corrected_value: null, resolver: 'U-MANAGER',
+    resolved_at: '2026-09-12T05:00:00.000Z'
+  } },
+  text: 'Notes: PHP actual confirmed: ₱200,832.18.'
+}];
 delete require.cache[require.resolve('./audit')];
 const { resolutionOverlaysForCounts } = require('./audit');
 (async () => {

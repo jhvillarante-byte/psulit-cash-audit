@@ -203,7 +203,8 @@ async function resolutionOverlaysForCounts(channelId, counts) {
         for (const count of wanted.values()) {
           const correction = correctionFromResolution(reply, count, {
             channel: channelId,
-            parentTs: parent.ts
+            parentTs: parent.ts,
+            parentText: parent.text || ''
           });
           if (!correction) continue;
           const key = `${correction.cashCountRef}|${correction.currency}`;

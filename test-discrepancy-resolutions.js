@@ -69,6 +69,19 @@ const actionPayload = { type: 'block_actions', user: { id: 'U-MANAGER' }, channe
   });
   assert.strictEqual(legacyCorrection.originalValue, 205832.18);
   assert.strictEqual(legacyCorrection.correctedValue, 200832.18);
+  const legacyHandoverCorrection = correctionFromResolution({
+    ts: '125.000', text: 'Notes: PHP actual confirmed: ₱200,832.18.',
+    metadata: { event_type: RESOLUTION_EVENT, event_payload: {
+      reason: 'Cash count encoding error', opening_ref: 'PSC-NEXT-OPEN',
+      closing_ref: 'PSC-PRIOR-CLOSE', currency: 'PHP', resolver: 'U-MANAGER',
+      resolved_at: '2026-09-12T05:00:00.000Z'
+    } }
+  }, { refCode: 'PSC-NEXT-OPEN', totals: { PHP: 205832.18 } }, {
+    channel: 'C-ALPHALAND', parentTs: '123.457',
+    parentText: 'Alphaland HANDOVER CHECK'
+  });
+  assert.strictEqual(legacyHandoverCorrection.cashCountRef, 'PSC-NEXT-OPEN');
+  assert.strictEqual(legacyHandoverCorrection.correctedValue, 200832.18);
   console.log('discrepancy resolution authorization: PASS');
   console.log('immutable Slack resolution event: PASS');
   console.log('duplicate resolution prevention: PASS');

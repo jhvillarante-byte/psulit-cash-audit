@@ -72,7 +72,10 @@ function correctionFromResolution(reply, lockedCount, context = {}) {
   const payload = reply?.metadata?.event_payload;
   if (reply?.metadata?.event_type !== RESOLUTION_EVENT ||
       payload?.reason !== 'Cash count encoding error') return null;
-  const targetRef = payload.affected_ref || payload.closing_ref;
+  const legacyTargetRef = /HANDOVER CHECK/i.test(context.parentText || '')
+    ? payload.opening_ref
+    : payload.closing_ref;
+  const targetRef = payload.affected_ref || legacyTargetRef;
   if (!targetRef || targetRef !== lockedCount?.refCode ||
       !/^[A-Z]{3}$/.test(payload.currency || '')) return null;
   const correctedValue = payload.corrected_value != null && Number.isFinite(Number(payload.corrected_value))
