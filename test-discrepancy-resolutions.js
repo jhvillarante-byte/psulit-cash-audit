@@ -24,6 +24,9 @@ const actionPayload = { type: 'block_actions', user: { id: 'U-MANAGER' }, channe
   await workflow.blockAction(actionPayload);
   assert.strictEqual(opened.length, 1);
   assert(opened[0].view.private_metadata.includes('123.456'));
+  const reasonBlock = opened[0].view.blocks.find(block => block.block_id === 'reason');
+  assert.strictEqual(reasonBlock.dispatch_action, true);
+  assert.strictEqual(Object.hasOwn(reasonBlock.element, 'dispatch_action'), false);
   await workflow.blockAction({
     type: 'block_actions', user: { id: 'U-MANAGER' },
     view: { id: 'V-1', hash: 'hash-1', private_metadata: opened[0].view.private_metadata },

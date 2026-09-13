@@ -117,9 +117,10 @@ function modal(details, selectedReason = null) {
     close: { type: 'plain_text', text: 'Cancel' },
     blocks: [
       {
-        type: 'input', block_id: 'reason', label: { type: 'plain_text', text: 'Resolution Reason' },
+        type: 'input', block_id: 'reason', dispatch_action: true,
+        label: { type: 'plain_text', text: 'Resolution Reason' },
         element: {
-          type: 'static_select', action_id: REASON_ACTION_ID, dispatch_action: true,
+          type: 'static_select', action_id: REASON_ACTION_ID,
           placeholder: { type: 'plain_text', text: 'Select a reason' }, options: reasonOptions,
           ...(selectedReason ? { initial_option: reasonOptions.find(option => option.value === selectedReason) } : {})
         }
