@@ -1,15 +1,16 @@
 const assert = require('assert');
-const { ACTION_ID, RESOLUTION_EVENT, correctionFromResolution, createResolutionWorkflow, formatResolution, parseConfirmedBalance, reportBlocks, resolutionKey, submissionErrors } = require('./discrepancy-resolutions');
+const { ACTION_ID, REASON_ACTION_ID, RESOLUTION_EVENT, correctionFromResolution, createResolutionWorkflow, formatResolution, parseConfirmedBalance, reportBlocks, resolutionKey, submissionErrors } = require('./discrepancy-resolutions');
 
 const details = { channel: 'C-ALPHALAND', branch: 'Alphaland', openingRef: 'PSC-OPEN', closingRef: 'PSC-CLOSE', currency: 'PHP', amount: 5000, direction: 'EXTRA' };
 const env = { BRANCHES: 'Alphaland:C-ALPHALAND:TX:HIVE:EXP', SLACK_MANAGER_USER_IDS: 'U-MANAGER' };
 const actionPayload = { type: 'block_actions', user: { id: 'U-MANAGER' }, channel: { id: 'C-ALPHALAND' }, container: { message_ts: '123.456' }, trigger_id: 'trigger', actions: [{ action_id: ACTION_ID, value: JSON.stringify(details) }] };
 
 (async () => {
-  const opened = []; const ephemeral = []; const posted = []; let replies = [];
+  const opened = []; const updated = []; const ephemeral = []; const posted = []; let replies = [];
   const workflow = createResolutionWorkflow({
     env, now: () => new Date('2026-09-12T05:00:00.000Z'), threadReplies: async () => replies,
     openView: async (trigger, view) => opened.push({ trigger, view }),
+    updateView: async (viewId, hash, view) => updated.push({ viewId, hash, view }),
     postEphemeral: async (channel, user, text) => ephemeral.push({ channel, user, text }),
     postResolution: async (channel, parentTs, text, options) => {
       const message = { channel, ts: '124.000', thread_ts: parentTs, text, metadata: options.metadata, clientMsgId: options.clientMsgId };
@@ -23,6 +24,15 @@ const actionPayload = { type: 'block_actions', user: { id: 'U-MANAGER' }, channe
   await workflow.blockAction(actionPayload);
   assert.strictEqual(opened.length, 1);
   assert(opened[0].view.private_metadata.includes('123.456'));
+  await workflow.blockAction({
+    type: 'block_actions', user: { id: 'U-MANAGER' },
+    view: { id: 'V-1', hash: 'hash-1', private_metadata: opened[0].view.private_metadata },
+    actions: [{ action_id: REASON_ACTION_ID, selected_option: { value: 'Cash count encoding error' } }]
+  });
+  assert.strictEqual(updated.length, 1);
+  const requiredBlocks = updated[0].view.blocks.filter(block => ['affected_count', 'corrected_balance'].includes(block.block_id));
+  assert(requiredBlocks.every(block => block.optional === false));
+  assert(requiredBlocks.every(block => block.label.text.includes('Required')));
 
   const submission = { type: 'view_submission', user: { id: 'U-MANAGER' }, view: { private_metadata: opened[0].view.private_metadata, state: { values: {
     reason: { value: { selected_option: { value: 'Cash count encoding error' } } },
@@ -37,6 +47,9 @@ const actionPayload = { type: 'block_actions', user: { id: 'U-MANAGER' }, channe
   const missingBalance = JSON.parse(JSON.stringify(submission));
   missingBalance.view.state.values.corrected_balance.value.value = '';
   assert.strictEqual(submissionErrors(missingBalance).corrected_balance, 'Please select the affected cash count and enter the confirmed corrected balance.');
+  const currencyPrefixedBalance = JSON.parse(JSON.stringify(submission));
+  currencyPrefixedBalance.view.state.values.corrected_balance.value.value = 'HKD 23,590';
+  assert.deepStrictEqual(submissionErrors(currencyPrefixedBalance), {});
   const otherReason = JSON.parse(JSON.stringify(missingSide));
   otherReason.view.state.values.reason.value.selected_option.value = 'Verified cash movement';
   otherReason.view.state.values.corrected_balance.value.value = '';

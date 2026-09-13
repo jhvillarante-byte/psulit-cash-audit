@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 
 const ACTION_ID = 'resolve_discrepancy';
+const REASON_ACTION_ID = 'resolution_reason_changed';
 const CALLBACK_ID = 'resolve_discrepancy_modal';
 const RESOLUTION_EVENT = 'psulit_discrepancy_resolution';
 const REASONS = [
@@ -105,7 +106,9 @@ function correctionFromResolution(reply, lockedCount, context = {}) {
   };
 }
 
-function modal(details) {
+function modal(details, selectedReason = null) {
+  const encodingRequired = selectedReason === 'Cash count encoding error';
+  const reasonOptions = REASONS.map(reason => ({ text: { type: 'plain_text', text: reason }, value: reason }));
   return {
     type: 'modal', callback_id: CALLBACK_ID,
     private_metadata: JSON.stringify(details),
@@ -116,8 +119,9 @@ function modal(details) {
       {
         type: 'input', block_id: 'reason', label: { type: 'plain_text', text: 'Resolution Reason' },
         element: {
-          type: 'static_select', action_id: 'value', placeholder: { type: 'plain_text', text: 'Select a reason' },
-          options: REASONS.map(reason => ({ text: { type: 'plain_text', text: reason }, value: reason }))
+          type: 'static_select', action_id: REASON_ACTION_ID, dispatch_action: true,
+          placeholder: { type: 'plain_text', text: 'Select a reason' }, options: reasonOptions,
+          ...(selectedReason ? { initial_option: reasonOptions.find(option => option.value === selectedReason) } : {})
         }
       },
       {
@@ -125,16 +129,16 @@ function modal(details) {
         element: { type: 'plain_text_input', action_id: 'value', multiline: true, max_length: 1000 }
       },
       {
-        type: 'input', block_id: 'affected_count', optional: true,
-        label: { type: 'plain_text', text: 'Affected cash count (required for encoding errors)' },
+        type: 'input', block_id: 'affected_count', optional: !encodingRequired,
+        label: { type: 'plain_text', text: encodingRequired ? 'Affected cash count — Required' : 'Affected cash count' },
         element: { type: 'static_select', action_id: 'value', options: [
           { text: { type: 'plain_text', text: 'Opening' }, value: 'opening' },
           { text: { type: 'plain_text', text: 'Closing' }, value: 'closing' }
         ] }
       },
       {
-        type: 'input', block_id: 'corrected_balance', optional: true,
-        label: { type: 'plain_text', text: 'Confirmed balance (required for encoding errors)' },
+        type: 'input', block_id: 'corrected_balance', optional: !encodingRequired,
+        label: { type: 'plain_text', text: encodingRequired ? 'Confirmed corrected balance — Required' : 'Confirmed corrected balance' },
         element: { type: 'plain_text_input', action_id: 'value' }
       }
     ]
@@ -157,11 +161,18 @@ function validateDetails(details, payload, allowedChannels) {
 
 function submissionValues(payload) {
   const values = payload.view?.state?.values || {};
-  const reason = values.reason?.value?.selected_option?.value;
+  const reason = values.reason?.[REASON_ACTION_ID]?.selected_option?.value || values.reason?.value?.selected_option?.value;
   const notes = String(values.notes?.value?.value || '').trim();
   const affectedSide = values.affected_count?.value?.selected_option?.value || null;
-  const correctedRaw = String(values.corrected_balance?.value?.value || '').replace(/,/g, '').trim();
-  const correctedValue = correctedRaw === '' ? null : Number(correctedRaw);
+  const correctedRaw = String(values.corrected_balance?.value?.value || '').trim();
+  const normalizedBalance = correctedRaw
+    .replace(/^\s*[A-Z]{3}\s*/i, '')
+    .replace(/^\s*(?:PHP|HK\$|NT\$|C\$|A\$|S\$|[₱$€£¥])\s*/i, '')
+    .replace(/,/g, '')
+    .trim();
+  const correctedValue = normalizedBalance === '' || !/^\d+(?:\.\d+)?$/.test(normalizedBalance)
+    ? null
+    : Number(normalizedBalance);
   return { reason, notes, affectedSide, correctedRaw, correctedValue };
 }
 
@@ -177,12 +188,21 @@ function submissionErrors(payload) {
   return errors;
 }
 
-function createResolutionWorkflow({ threadReplies, openView, postEphemeral, postResolution, env = process.env, now = () => new Date() }) {
+function createResolutionWorkflow({ threadReplies, openView, updateView = async () => {}, postEphemeral, postResolution, env = process.env, now = () => new Date() }) {
   const allowedChannels = new Set(String(env.BRANCHES || '').split(',').map(entry => entry.split(':')[1]?.trim()).filter(Boolean));
   const authorized = managerIds(env);
 
   async function blockAction(payload) {
     const userId = payload.user?.id;
+    if (payload.actions?.[0]?.action_id === REASON_ACTION_ID) {
+      if (!authorized.has(userId)) throw new Error('Unauthorized discrepancy resolution manager.');
+      const details = JSON.parse(payload.view?.private_metadata || '{}');
+      if (!allowedChannels.has(details.channel)) throw new Error('Invalid discrepancy resolution channel.');
+      const selectedReason = payload.actions[0]?.selected_option?.value || null;
+      if (!REASONS.includes(selectedReason)) throw new Error('Invalid discrepancy resolution reason.');
+      await updateView(payload.view?.id, payload.view?.hash, modal(details, selectedReason));
+      return { updated: true };
+    }
     const details = { ...JSON.parse(payload.actions?.[0]?.value || '{}'), parentTs: payload.container?.message_ts };
     if (!authorized.has(userId)) {
       await postEphemeral(payload.channel?.id, userId, 'You are not authorized to resolve this discrepancy.');
@@ -240,4 +260,4 @@ function createResolutionWorkflow({ threadReplies, openView, postEphemeral, post
   return { blockAction, viewSubmission, validateSubmission, notifyFailure };
 }
 
-module.exports = { ACTION_ID, CALLBACK_ID, REASONS, RESOLUTION_EVENT, correctionFromResolution, createResolutionWorkflow, formatResolution, parseConfirmedBalance, reportBlocks, resolutionKey, resolutionFromReplies, submissionErrors };
+module.exports = { ACTION_ID, CALLBACK_ID, REASON_ACTION_ID, REASONS, RESOLUTION_EVENT, correctionFromResolution, createResolutionWorkflow, formatResolution, parseConfirmedBalance, reportBlocks, resolutionKey, resolutionFromReplies, submissionErrors };

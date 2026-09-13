@@ -28,6 +28,7 @@ const {
   slackFileInfo,
   uploadThreadImage,
   openView,
+  updateView,
   postEphemeral,
   postResolution,
   recoverFromReceiptImage,
@@ -145,6 +146,7 @@ app.use(
 const discrepancyResolutionWorkflow = createResolutionWorkflow({
   threadReplies,
   openView,
+  updateView,
   postEphemeral,
   postResolution
 });

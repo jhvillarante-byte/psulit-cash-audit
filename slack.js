@@ -103,6 +103,12 @@ async function openView(triggerId, view) {
   return res.data;
 }
 
+async function updateView(viewId, hash, view) {
+  const res = await client().post('/views.update', { view_id: viewId, hash, view });
+  if (!res.data.ok) throw new Error(`Slack views.update error: ${res.data.error}`);
+  return res.data;
+}
+
 async function postEphemeral(channelId, userId, text) {
   const res = await client().post('/chat.postEphemeral', { channel: channelId, user: userId, text });
   if (!res.data.ok) throw new Error(`Slack postEphemeral error: ${res.data.error}`);
@@ -224,6 +230,7 @@ module.exports = {
   uploadThreadImage,
   postMessage,
   openView,
+  updateView,
   postEphemeral,
   postResolution,
   recoverFromReceiptImage,
