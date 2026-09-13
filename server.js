@@ -164,15 +164,31 @@ app.post('/slack/interactions', async (req, res) => {
       return res.status(200).send();
     } catch (err) {
       console.error('Resolve discrepancy action failed:', err.message);
+      await discrepancyResolutionWorkflow.notifyFailure(
+        payload,
+        'Unable to open the resolution form. Please try again.'
+      ).catch(notifyErr =>
+        console.error('Resolve discrepancy action notification failed:', notifyErr.message)
+      );
       return res.status(200).send();
     }
   }
 
   if (payload.type === 'view_submission' && payload.view?.callback_id === CALLBACK_ID) {
+    const errors = discrepancyResolutionWorkflow.validateSubmission(payload);
+    if (Object.keys(errors).length) {
+      return res.status(200).json({ response_action: 'errors', errors });
+    }
     res.status(200).send();
-    discrepancyResolutionWorkflow.viewSubmission(payload).catch(err =>
-      console.error('Resolve discrepancy submission failed:', err.message)
-    );
+    discrepancyResolutionWorkflow.viewSubmission(payload).catch(async err => {
+      console.error('Resolve discrepancy submission failed:', err.message);
+      await discrepancyResolutionWorkflow.notifyFailure(
+        payload,
+        'Unable to record the discrepancy resolution. Nothing was resolved. Please try again.'
+      ).catch(notifyErr =>
+        console.error('Resolve discrepancy submission notification failed:', notifyErr.message)
+      );
+    });
     return;
   }
 

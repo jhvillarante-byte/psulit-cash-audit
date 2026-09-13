@@ -1,5 +1,5 @@
 const assert = require('assert');
-const { ACTION_ID, RESOLUTION_EVENT, correctionFromResolution, createResolutionWorkflow, formatResolution, parseConfirmedBalance, reportBlocks, resolutionKey } = require('./discrepancy-resolutions');
+const { ACTION_ID, RESOLUTION_EVENT, correctionFromResolution, createResolutionWorkflow, formatResolution, parseConfirmedBalance, reportBlocks, resolutionKey, submissionErrors } = require('./discrepancy-resolutions');
 
 const details = { channel: 'C-ALPHALAND', branch: 'Alphaland', openingRef: 'PSC-OPEN', closingRef: 'PSC-CLOSE', currency: 'PHP', amount: 5000, direction: 'EXTRA' };
 const env = { BRANCHES: 'Alphaland:C-ALPHALAND:TX:HIVE:EXP', SLACK_MANAGER_USER_IDS: 'U-MANAGER' };
@@ -30,6 +30,17 @@ const actionPayload = { type: 'block_actions', user: { id: 'U-MANAGER' }, channe
     affected_count: { value: { selected_option: { value: 'closing' } } },
     corrected_balance: { value: { value: '200,832.18' } }
   } } } };
+  assert.deepStrictEqual(submissionErrors(submission), {});
+  const missingSide = JSON.parse(JSON.stringify(submission));
+  delete missingSide.view.state.values.affected_count.value.selected_option;
+  assert.strictEqual(submissionErrors(missingSide).affected_count, 'Please select the affected cash count and enter the confirmed corrected balance.');
+  const missingBalance = JSON.parse(JSON.stringify(submission));
+  missingBalance.view.state.values.corrected_balance.value.value = '';
+  assert.strictEqual(submissionErrors(missingBalance).corrected_balance, 'Please select the affected cash count and enter the confirmed corrected balance.');
+  const otherReason = JSON.parse(JSON.stringify(missingSide));
+  otherReason.view.state.values.reason.value.selected_option.value = 'Verified cash movement';
+  otherReason.view.state.values.corrected_balance.value.value = '';
+  assert.deepStrictEqual(submissionErrors(otherReason), {});
   await workflow.viewSubmission(submission);
   assert.strictEqual(posted.length, 1);
   assert(posted[0].text.includes('✅ *DISCREPANCY RESOLVED*'));
@@ -50,7 +61,19 @@ const actionPayload = { type: 'block_actions', user: { id: 'U-MANAGER' }, channe
 
   const unauthorized = createResolutionWorkflow({ env, threadReplies: async () => [], openView: async () => { throw new Error('must not open'); }, postEphemeral: async (channel, user, text) => ephemeral.push({ channel, user, text }), postResolution: async () => {} });
   assert.strictEqual((await unauthorized.blockAction({ ...actionPayload, user: { id: 'U-TELLER' } })).authorized, false);
+  assert(ephemeral.at(-1).text.includes('not authorized'));
   await assert.rejects(workflow.blockAction({ ...actionPayload, channel: { id: 'C-WRONG' } }), /Invalid discrepancy resolution target/);
+
+  const repliesFailure = createResolutionWorkflow({ env, threadReplies: async () => { throw new Error('replies unavailable'); }, openView: async () => {}, postEphemeral: async () => {}, postResolution: async () => {} });
+  await assert.rejects(repliesFailure.blockAction(actionPayload), /replies unavailable/);
+  const viewFailure = createResolutionWorkflow({ env, threadReplies: async () => [], openView: async () => { throw new Error('views.open failed'); }, postEphemeral: async () => {}, postResolution: async () => {} });
+  await assert.rejects(viewFailure.blockAction(actionPayload), /views.open failed/);
+  const failedPosts = [];
+  const postFailure = createResolutionWorkflow({ env, threadReplies: async () => [], openView: async () => {}, postEphemeral: async () => {}, postResolution: async (...args) => { failedPosts.push(args); throw new Error('chat.postMessage failed'); } });
+  await assert.rejects(postFailure.viewSubmission(submission), /chat.postMessage failed/);
+  assert.strictEqual(failedPosts.length, 1);
+  assert.strictEqual(failedPosts[0][3].metadata.event_type, RESOLUTION_EVENT);
+  assert.strictEqual(posted.length, 1, 'a failed post must not create another formal resolution event');
 
   const twd = { ...details, currency: 'TWD', amount: 500, direction: 'SHORT' };
   assert.notStrictEqual(resolutionKey({ ...details, parentTs: '123.456' }), resolutionKey({ ...twd, parentTs: '123.456' }));

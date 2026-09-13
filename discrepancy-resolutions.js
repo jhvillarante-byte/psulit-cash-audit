@@ -126,7 +126,7 @@ function modal(details) {
       },
       {
         type: 'input', block_id: 'affected_count', optional: true,
-        label: { type: 'plain_text', text: 'Affected cash count (encoding errors)' },
+        label: { type: 'plain_text', text: 'Affected cash count (required for encoding errors)' },
         element: { type: 'static_select', action_id: 'value', options: [
           { text: { type: 'plain_text', text: 'Opening' }, value: 'opening' },
           { text: { type: 'plain_text', text: 'Closing' }, value: 'closing' }
@@ -134,7 +134,7 @@ function modal(details) {
       },
       {
         type: 'input', block_id: 'corrected_balance', optional: true,
-        label: { type: 'plain_text', text: 'Confirmed corrected balance' },
+        label: { type: 'plain_text', text: 'Confirmed balance (required for encoding errors)' },
         element: { type: 'plain_text_input', action_id: 'value' }
       }
     ]
@@ -155,6 +155,28 @@ function validateDetails(details, payload, allowedChannels) {
     details.closingRef && details.currency && Number.isFinite(Number(details.amount));
 }
 
+function submissionValues(payload) {
+  const values = payload.view?.state?.values || {};
+  const reason = values.reason?.value?.selected_option?.value;
+  const notes = String(values.notes?.value?.value || '').trim();
+  const affectedSide = values.affected_count?.value?.selected_option?.value || null;
+  const correctedRaw = String(values.corrected_balance?.value?.value || '').replace(/,/g, '').trim();
+  const correctedValue = correctedRaw === '' ? null : Number(correctedRaw);
+  return { reason, notes, affectedSide, correctedRaw, correctedValue };
+}
+
+function submissionErrors(payload) {
+  const { reason, affectedSide, correctedRaw, correctedValue } = submissionValues(payload);
+  const errors = {};
+  if (!REASONS.includes(reason)) errors.reason = 'Please select a resolution reason.';
+  if (reason === 'Cash count encoding error') {
+    const message = 'Please select the affected cash count and enter the confirmed corrected balance.';
+    if (!['opening', 'closing'].includes(affectedSide)) errors.affected_count = message;
+    if (correctedRaw === '' || !Number.isFinite(correctedValue) || correctedValue < 0) errors.corrected_balance = message;
+  }
+  return errors;
+}
+
 function createResolutionWorkflow({ threadReplies, openView, postEphemeral, postResolution, env = process.env, now = () => new Date() }) {
   const allowedChannels = new Set(String(env.BRANCHES || '').split(',').map(entry => entry.split(':')[1]?.trim()).filter(Boolean));
   const authorized = managerIds(env);
@@ -163,7 +185,7 @@ function createResolutionWorkflow({ threadReplies, openView, postEphemeral, post
     const userId = payload.user?.id;
     const details = { ...JSON.parse(payload.actions?.[0]?.value || '{}'), parentTs: payload.container?.message_ts };
     if (!authorized.has(userId)) {
-      await postEphemeral(payload.channel?.id, userId, 'Only an authorized manager can resolve audit discrepancies.');
+      await postEphemeral(payload.channel?.id, userId, 'You are not authorized to resolve this discrepancy.');
       return { authorized: false };
     }
     if (!validateDetails(details, payload, allowedChannels)) throw new Error('Invalid discrepancy resolution target.');
@@ -181,16 +203,9 @@ function createResolutionWorkflow({ threadReplies, openView, postEphemeral, post
     if (!authorized.has(userId)) return { authorized: false };
     const details = JSON.parse(payload.view?.private_metadata || '{}');
     if (!allowedChannels.has(details.channel)) throw new Error('Invalid discrepancy resolution channel.');
-    const reason = payload.view?.state?.values?.reason?.value?.selected_option?.value;
-    const notes = String(payload.view?.state?.values?.notes?.value?.value || '').trim();
-    if (!REASONS.includes(reason)) throw new Error('Invalid discrepancy resolution reason.');
-    const affectedSide = payload.view?.state?.values?.affected_count?.value?.selected_option?.value || null;
-    const correctedRaw = String(payload.view?.state?.values?.corrected_balance?.value?.value || '').replace(/,/g, '').trim();
-    const correctedValue = correctedRaw === '' ? null : Number(correctedRaw);
-    if (reason === 'Cash count encoding error' &&
-        (!['opening', 'closing'].includes(affectedSide) || !Number.isFinite(correctedValue) || correctedValue < 0)) {
-      throw new Error('Cash count encoding corrections require the affected count and confirmed corrected balance.');
-    }
+    const errors = submissionErrors(payload);
+    if (Object.keys(errors).length) throw new Error('Invalid discrepancy resolution submission.');
+    const { reason, notes, affectedSide, correctedValue } = submissionValues(payload);
     const key = resolutionKey(details);
     const existing = resolutionFromReplies(await threadReplies(details.channel, details.parentTs), key);
     if (existing) {
@@ -207,7 +222,22 @@ function createResolutionWorkflow({ threadReplies, openView, postEphemeral, post
     return { posted };
   }
 
-  return { blockAction, viewSubmission };
+  function validateSubmission(payload) {
+    const userId = payload.user?.id;
+    if (!authorized.has(userId)) return { reason: 'You are not authorized to resolve this discrepancy.' };
+    let details;
+    try { details = JSON.parse(payload.view?.private_metadata || '{}'); } catch { return { reason: 'This resolution target is invalid. Please close the form and try again.' }; }
+    if (!allowedChannels.has(details.channel)) return { reason: 'This resolution target is invalid. Please close the form and try again.' };
+    return submissionErrors(payload);
+  }
+
+  async function notifyFailure(payload, message) {
+    const channel = payload.channel?.id || (() => { try { return JSON.parse(payload.view?.private_metadata || '{}').channel; } catch { return null; } })();
+    const userId = payload.user?.id;
+    if (channel && userId) await postEphemeral(channel, userId, message);
+  }
+
+  return { blockAction, viewSubmission, validateSubmission, notifyFailure };
 }
 
-module.exports = { ACTION_ID, CALLBACK_ID, REASONS, RESOLUTION_EVENT, correctionFromResolution, createResolutionWorkflow, formatResolution, parseConfirmedBalance, reportBlocks, resolutionKey, resolutionFromReplies };
+module.exports = { ACTION_ID, CALLBACK_ID, REASONS, RESOLUTION_EVENT, correctionFromResolution, createResolutionWorkflow, formatResolution, parseConfirmedBalance, reportBlocks, resolutionKey, resolutionFromReplies, submissionErrors };
