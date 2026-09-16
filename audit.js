@@ -5,9 +5,9 @@
  * 1) SHIFT AUDIT at the scheduled closing count.
  * 2) HANDOVER CHECK at the next scheduled opening count.
  *
- * Important: audit windows use the timestamp INSIDE the cash-count report,
- * not the later Slack posting time. This prevents delayed Slack posts from
- * accidentally excluding/including transactions.
+ * Audit windows use the Slack message timestamps of the locked opening and
+ * closing reports. Embedded report timestamps remain display/schedule data;
+ * they can reflect when counting started rather than final submission.
  */
 
 const { APPROVED_CORRECTIONS, applyApprovedOpeningCorrections, applyApprovedTransactionCorrections } = require('./corrections');
@@ -145,35 +145,18 @@ function shouldPostFailureNotice(branch, kind) {
   return true;
 }
 
-/**
- * Convert a report timestamp like:
- * 09/06/2026, 10:14:34
- * to a Slack-compatible epoch timestamp in Manila time (UTC+8).
- */
-function countTimestampToSlackTs(timestamp) {
-  const m = String(timestamp || '').match(
-    /(\d{2})\/(\d{2})\/(\d{4}),\s*(\d{1,2}):(\d{2}):(\d{2})/
-  );
+function slackAuditWindow(openingSlackTs, closingSlackTs) {
+  const opening = Number(openingSlackTs);
+  const closing = Number(closingSlackTs);
+  if (!Number.isFinite(opening) || !Number.isFinite(closing) || opening >= closing) {
+    throw new Error('Valid ordered opening and closing Slack timestamps are required.');
+  }
+  return { oldest: String(openingSlackTs), latest: String(closingSlackTs) };
+}
 
-  if (!m) return null;
-
-  const month = Number(m[1]);
-  const day = Number(m[2]);
-  const year = Number(m[3]);
-  const hour = Number(m[4]);
-  const minute = Number(m[5]);
-  const second = Number(m[6]);
-
-  const epochMs = Date.UTC(
-    year,
-    month - 1,
-    day,
-    hour - 8,
-    minute,
-    second
-  );
-
-  return (epochMs / 1000).toFixed(6);
+function isSlackTsWithinAuditWindow(messageTs, window) {
+  const message = Number(messageTs);
+  return Number.isFinite(message) && message > Number(window.oldest) && message <= Number(window.latest);
 }
 
 function stripUntracked(totals) {
@@ -345,11 +328,7 @@ async function findOpeningForClosing(
         continue;
       }
 
-      const ts =
-        countTimestampToSlackTs(
-          parsed.timestamp
-        ) ||
-        msg.ts;
+      const ts = msg.ts;
 
       if (
         !best ||
@@ -454,11 +433,7 @@ async function findPriorScheduledClosing(
         _ts:
           msg.ts,
 
-        boundaryTs:
-          countTimestampToSlackTs(
-            parsed.timestamp
-          ) ||
-          msg.ts
+        boundaryTs: msg.ts
       };
     }
 
@@ -1585,17 +1560,9 @@ async function runShiftAudit(
       return;
     }
 
-    const openingBoundaryTs =
-      countTimestampToSlackTs(
-        openingCount.timestamp
-      ) ||
-      openingCount._ts;
-
-    const closingBoundaryTs =
-      countTimestampToSlackTs(
-        closingCount.timestamp
-      ) ||
-      closingEvent.ts;
+    const auditWindow = slackAuditWindow(openingCount._ts, closingEvent.ts);
+    const openingBoundaryTs = auditWindow.oldest;
+    const closingBoundaryTs = auditWindow.latest;
 
     const txMessages =
       await history(
@@ -2117,17 +2084,9 @@ async function runCloseVsOpenCheck(
       return;
     }
 
-    const closingBoundaryTs =
-      countTimestampToSlackTs(
-        closingCount.timestamp
-      ) ||
-      closingCount._ts;
-
-    const openingBoundaryTs =
-      countTimestampToSlackTs(
-        openingCount.timestamp
-      ) ||
-      openingEvent.ts;
+    const handoverWindow = slackAuditWindow(closingCount._ts, openingEvent.ts);
+    const closingBoundaryTs = handoverWindow.oldest;
+    const openingBoundaryTs = handoverWindow.latest;
 
     const gapMessages =
       await history(
@@ -2532,6 +2491,8 @@ module.exports = {
   buildExpenseAdjustments,
   expenseForexPhpEffect,
   buildShiftMath,
+  slackAuditWindow,
+  isSlackTsWithinAuditWindow,
   currencyHeading,
   resolutionOverlaysForCounts,
   isScheduledOpening,

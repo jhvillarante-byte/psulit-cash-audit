@@ -475,7 +475,7 @@ function registerTestRoutes(app, BRANCHES) {
           { ts: closing.msg.ts },
           closing.parsed,
           branchConfig,
-          { dryRun, openingCountOverride: opening.parsed }
+          { dryRun, openingCountOverride: { ...opening.parsed, _ts: opening.msg.ts } }
         );
         if (dryRun) {
           return res.type('text/plain').send(

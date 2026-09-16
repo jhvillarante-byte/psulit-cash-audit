@@ -5,7 +5,13 @@ const {
   parseTransaction
 } = require('./parse');
 const { reconcile } = require('./reconcile');
-const { buildExpenseAdjustments, expenseForexPhpEffect, buildShiftMath } = require('./audit');
+const {
+  buildExpenseAdjustments,
+  expenseForexPhpEffect,
+  buildShiftMath,
+  slackAuditWindow,
+  isSlackTsWithinAuditWindow
+} = require('./audit');
 
 const alphalandReceivable = parseExpenseEntry(`
 Expense ID: ALP-20260907-003
@@ -249,6 +255,23 @@ assert.match(resolvedMath, /Expected closing: \*฿500\.00\*/);
 assert.match(resolvedMath, /Actual closing:\s+\*฿500\.00\*/);
 assert.match(resolvedMath, /Difference:\s+\*฿0\.00\*/);
 
+const solaireSlackWindow = slackAuditWindow(
+  String(Date.UTC(2026, 8, 15, 3, 35, 0) / 1000),
+  '1789505454.235929'
+);
+const ar1766At0439 = String(Date.UTC(2026, 8, 15, 20, 39, 0) / 1000);
+const afterClosingAt0451 = String(Date.UTC(2026, 8, 15, 20, 51, 0) / 1000);
+assert.equal(isSlackTsWithinAuditWindow(ar1766At0439, solaireSlackWindow), true,
+  'AR 0001766 after counting started but before the closing Slack post must be included');
+assert.equal(isSlackTsWithinAuditWindow('1789505454.235929', solaireSlackWindow), true,
+  'the final closing boundary is inclusive');
+assert.equal(isSlackTsWithinAuditWindow(afterClosingAt0451, solaireSlackWindow), false,
+  'a transaction after the closing Slack post must belong to the next audit period');
+assert.deepEqual(
+  { phpExpected: 1225256.05 - 25060, phpActual: 1200196.05, usdExpected: 340 + 400, usdActual: 740 },
+  { phpExpected: 1200196.05, phpActual: 1200196.05, usdExpected: 740, usdActual: 740 }
+);
+
 console.log('foreign-currency receivable reconciliation: PASS');
 console.log('actual TWD NT$ cash-count format: PASS');
 console.log('Scratch-funded SMART receivable exclusion: PASS');
@@ -259,3 +282,4 @@ console.log('ordinary expense and replenishment regression: PASS');
 console.log('structured expense direction and fund scope: PASS');
 console.log('foreign-currency Owner Collection fund movement: PASS');
 console.log('resolved opening correction full-math reporting: PASS');
+console.log('Slack-message audit cutoff inclusion/exclusion: PASS');
