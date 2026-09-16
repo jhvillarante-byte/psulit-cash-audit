@@ -48,11 +48,63 @@ assert.throws(
   'duplicate formal resolutions must not apply twice'
 );
 
+const omittedThbOpening = {
+  branch: 'Alphaland',
+  refCode: 'PSC-MU3FEXID-YAZA',
+  totals: { PHP: 200859.73, USD: 130 }
+};
+const omittedThbResolution = {
+  ts: '300.001',
+  text: '✅ DISCREPANCY RESOLVED',
+  metadata: { event_type: RESOLUTION_EVENT, event_payload: {
+    reason: 'Cash count encoding error',
+    affected_ref: omittedThbOpening.refCode,
+    opening_ref: omittedThbOpening.refCode,
+    closing_ref: 'PSC-MU2NUJZF-7JT3',
+    currency: 'THB',
+    corrected_value: '500',
+    resolver: 'U-MANAGER',
+    resolved_at: '2026-09-16T02:00:00.000Z'
+  } }
+};
+const thbOverlay = correctionFromResolution(omittedThbResolution, omittedThbOpening, {
+  channel: 'C-ALPHALAND', parentTs: '1789522775.903279'
+});
+const thbEffectiveOpening = applyApprovedOpeningCorrections(omittedThbOpening, [thbOverlay]);
+assert.deepStrictEqual(omittedThbOpening.totals, { PHP: 200859.73, USD: 130 }, 'omitted THB must stay omitted in locked source evidence');
+assert.strictEqual(thbOverlay.originalValue, 0, 'a formally targeted omitted currency has an original effective value of zero');
+assert.strictEqual(thbEffectiveOpening.effectiveTotals.THB, 500);
+assert.deepStrictEqual(
+  reconcile(thbEffectiveOpening.effectiveTotals, { PHP: 200859.73, USD: 130, THB: 500 }, [])
+    .find(result => result.ccy === 'THB'),
+  { ccy: 'THB', expected: 500, actual: 500, diff: 0, match: true }
+);
+
+const structuredRecount = {
+  ...omittedThbResolution,
+  ts: '300.002',
+  metadata: { event_type: RESOLUTION_EVENT, event_payload: {
+    ...omittedThbResolution.metadata.event_payload,
+    reason: 'Teller recount confirmed'
+  } }
+};
+assert.strictEqual(correctionFromResolution(structuredRecount, omittedThbOpening).correctedValue, 500);
+assert.strictEqual(correctionFromResolution({
+  ...structuredRecount,
+  metadata: { event_type: RESOLUTION_EVENT, event_payload: {
+    ...structuredRecount.metadata.event_payload,
+    affected_ref: null,
+    corrected_value: null
+  } }
+}, omittedThbOpening), null, 'an incomplete recount event must not change balances');
+
 console.log('same-day corrected effective opening: PASS');
 console.log('locked count immutability: PASS');
 console.log('unresolved reply isolation: PASS');
 console.log('currency/reference scoping: PASS');
 console.log('duplicate overlay protection: PASS');
+console.log('formally resolved omitted-currency carry-forward: PASS');
+console.log('structured recount eligibility: PASS');
 
 // Integration: discover only a formal event from the audit thread and carry its
 // corrected closing forward as the next same-day shift's effective opening.

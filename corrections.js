@@ -169,7 +169,10 @@ function applyApprovedOpeningCorrections(openingCount, corrections = APPROVED_CO
   const applied = [];
 
   for (const correction of correctionsForOpening(openingCount && openingCount.refCode, corrections)) {
-    const recorded = effectiveTotals[correction.currency];
+    const stored = effectiveTotals[correction.currency];
+    const recorded = stored == null && correction.resolutionOverlay && correction.originalValue === 0
+      ? 0
+      : stored;
     if (!Number.isFinite(recorded) || Math.abs(recorded - correction.originalValue) > 0.01) {
       throw new Error(`Approved correction original value mismatch for ${correction.cashCountRef || correction.openingRef} ${correction.currency}`);
     }

@@ -71,18 +71,22 @@ function parseConfirmedBalance(text) {
 
 function correctionFromResolution(reply, lockedCount, context = {}) {
   const payload = reply?.metadata?.event_payload;
-  if (reply?.metadata?.event_type !== RESOLUTION_EVENT ||
-      payload?.reason !== 'Cash count encoding error') return null;
+  if (reply?.metadata?.event_type !== RESOLUTION_EVENT) return null;
+  const isEncodingCorrection = payload?.reason === 'Cash count encoding error';
+  const isStructuredRecount = payload?.reason === 'Teller recount confirmed' &&
+    payload?.affected_ref && payload?.corrected_value != null;
+  if (!isEncodingCorrection && !isStructuredRecount) return null;
   const legacyTargetRef = /HANDOVER CHECK|🔄|\bClose\b[\s\S]*→[\s\S]*\bOpen\b/i.test(context.parentText || '')
     ? payload.opening_ref
     : payload.closing_ref;
-  const targetRef = payload.affected_ref || legacyTargetRef;
+  const targetRef = payload.affected_ref || (isEncodingCorrection ? legacyTargetRef : null);
   if (!targetRef || targetRef !== lockedCount?.refCode ||
       !/^[A-Z]{3}$/.test(payload.currency || '')) return null;
   const correctedValue = payload.corrected_value != null && Number.isFinite(Number(payload.corrected_value))
     ? Number(payload.corrected_value)
-    : parseConfirmedBalance(reply.text);
-  const originalValue = lockedCount?.totals?.[payload.currency] ?? lockedCount?.others?.[payload.currency];
+    : isEncodingCorrection ? parseConfirmedBalance(reply.text) : null;
+  const recordedValue = lockedCount?.totals?.[payload.currency] ?? lockedCount?.others?.[payload.currency];
+  const originalValue = recordedValue == null ? 0 : recordedValue;
   if (!Number.isFinite(correctedValue) || !Number.isFinite(originalValue)) return null;
   return {
     id: `resolution:${reply.ts || payload.resolved_at}:${targetRef}:${payload.currency}`,
