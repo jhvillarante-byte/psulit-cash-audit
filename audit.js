@@ -1174,6 +1174,14 @@ function buildShiftSummary({
     );
 
     for (const entry of expenseEntries) {
+      if (entry.isOwnerCollection && entry.cashMovement) {
+        lines.push(
+          `💼 ${expenseLabel(entry.raw)}: ${moneyLabel(entry.cashMovement.ccy, Math.abs(entry.cashMovement.amount))} ` +
+          `Owner Collection cash out from ${entry.cashMovement.source || 'unconfirmed source'}; ` +
+          `${entry.cashMovement.ccy === 'PHP' ? 'PHP cash movement recorded.' : 'no Forex PHP impact.'}`
+        );
+        continue;
+      }
       if (!entry.isReceivable && entry.fundingSource &&
           (entry.reconciliationAmount ?? entry.amount) === 0) {
         const id = String(entry.raw || '').match(/Expense ID:\s*([^\n\r]+)/i)?.[1]?.trim() || 'Expense';
@@ -1421,6 +1429,18 @@ function buildShiftMath({
       lines.push(
         `${effect >= 0 ? '+' : '-'} ${rawTicketRef(ticket)}: ${moneyLabel(ccy, Math.abs(effect))}`
       );
+    }
+
+    if (ccy !== 'PHP') {
+      for (const entry of [...expenseEntries].sort((a, b) => parseFloat(a.ts) - parseFloat(b.ts))) {
+        if (!entry.cashMovement || entry.cashMovement.ccy !== ccy ||
+            entry.cashMovement.source !== 'Forex drawer') continue;
+        const effect = entry.cashMovement.amount;
+        relevant.push(effect);
+        lines.push(
+          `${effect >= 0 ? '+' : '-'} ${expenseLabel(entry.raw)}: ${moneyLabel(ccy, Math.abs(effect))}`
+        );
+      }
     }
 
     if (

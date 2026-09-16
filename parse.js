@@ -469,8 +469,25 @@ function parseExpenseEntry(text) {
   const isReceivable =
     /^receivable$/i.test(category || '');
 
+  const isOwnerCollection =
+    /^owner collection$/i.test(category || '');
+
   let cashMovement = null;
   let fundingSource = fundingSourceLine || null;
+
+  if (isOwnerCollection) {
+    const currencyMatch = amountLine.match(/\b([A-Z]{3})\b/i);
+    const currency = currencyMatch ? currencyMatch[1].toUpperCase() : 'PHP';
+    const source = /^forex drawer$/i.test(fundingSource || '')
+      ? 'Forex drawer'
+      : fundingSource;
+
+    cashMovement = {
+      ccy: currency,
+      amount: -amount,
+      source
+    };
+  }
 
   if (isReceivable && description) {
     // Confirmed business mapping: SMART Postpaid receivables are paid from
@@ -531,12 +548,15 @@ function parseExpenseEntry(text) {
     amount:
       isReceivable
         ? 0
+        : isOwnerCollection && cashMovement.ccy !== 'PHP'
+          ? 0
         : isTopUp
           ? amount
           : -amount,
     category,
     description,
     isReceivable,
+    isOwnerCollection,
     pesoValuation:
       isReceivable
         ? amount

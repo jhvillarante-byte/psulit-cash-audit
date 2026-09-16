@@ -215,6 +215,27 @@ assert.deepEqual(
   'one Forex expense must be applied exactly once'
 );
 
+const foreignOwnerCollection = parseExpenseEntry(`
+*OWNER COLLECTION*
+Record ID: SOL-20260915-003
+Category: Owner Collection
+*Amount: 3,370.00 USD*
+Fund: Forex Drawer
+Description: Owner USD collection
+`);
+assert.equal(foreignOwnerCollection.amount, 0, 'foreign Owner Collection must have no PHP effect');
+assert.equal(expenseForexPhpEffect(foreignOwnerCollection), 0, 'foreign Owner Collection must not change Forex PHP');
+assert.deepEqual(foreignOwnerCollection.cashMovement, {
+  ccy: 'USD',
+  amount: -3370,
+  source: 'Forex drawer'
+});
+assert.deepEqual(
+  buildExpenseAdjustments([foreignOwnerCollection], expenseForexPhpEffect(foreignOwnerCollection)),
+  { USD: -3370 },
+  'foreign Owner Collection must reduce only its actual drawer currency'
+);
+
 console.log('foreign-currency receivable reconciliation: PASS');
 console.log('actual TWD NT$ cash-count format: PASS');
 console.log('Scratch-funded SMART receivable exclusion: PASS');
@@ -223,3 +244,4 @@ console.log('ambiguous receivable review flag: PASS');
 console.log('unrelated overall discrepancy preserved: PASS');
 console.log('ordinary expense and replenishment regression: PASS');
 console.log('structured expense direction and fund scope: PASS');
+console.log('foreign-currency Owner Collection fund movement: PASS');
