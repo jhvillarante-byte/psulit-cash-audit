@@ -1359,16 +1359,14 @@ function buildShiftMath({
   results,
   tickets,
   expenseEntries,
-  cashMovementEntries
+  cashMovementEntries,
+  appliedCorrections = []
 }) {
-  const mismatches =
-    results.filter(
-      r =>
-        !r.match
-    );
+  const correctedCurrencies = new Set(appliedCorrections.map(correction => correction.currency));
+  const mathResults = results.filter(result => !result.match || correctedCurrencies.has(result.ccy));
 
   if (
-    !mismatches.length
+    !mathResults.length
   ) {
     return '';
   }
@@ -1381,11 +1379,11 @@ function buildShiftMath({
 
   for (
     let i = 0;
-    i < mismatches.length;
+    i < mathResults.length;
     i++
   ) {
     const r =
-      mismatches[i];
+      mathResults[i];
 
     const ccy =
       r.ccy;
@@ -1397,6 +1395,15 @@ function buildShiftMath({
     lines.push(
       `Opening: ${moneyLabel(ccy, openingTotals[ccy] || 0)}`
     );
+
+    const appliedCorrection = appliedCorrections.find(correction => correction.currency === ccy);
+    if (appliedCorrection) {
+      const compact = value => Number(value).toLocaleString('en-US', { maximumFractionDigits: 2 });
+      lines.push(
+        `Resolved Opening Correction: ${ccy} ${compact(appliedCorrection.originalValue)} → ` +
+        `${ccy} ${compact(appliedCorrection.correctedValue)}`
+      );
+    }
 
     const relevant =
       [];
@@ -1505,12 +1512,14 @@ function buildShiftMath({
     );
 
     lines.push(
-      `Difference:       *${r.diff < 0 ? 'SHORT' : 'EXTRA'} ${moneyLabel(ccy, Math.abs(r.diff))}*`
+      r.match
+        ? `Difference:       *${moneyLabel(ccy, 0)}*`
+        : `Difference:       *${r.diff < 0 ? 'SHORT' : 'EXTRA'} ${moneyLabel(ccy, Math.abs(r.diff))}*`
     );
 
     if (
       i <
-      mismatches.length - 1
+      mathResults.length - 1
     ) {
       lines.push('');
     }
@@ -1519,7 +1528,9 @@ function buildShiftMath({
   lines.push('');
 
   lines.push(
-    "Please check for any cash-in/cash-out, replenishment, transfer, expense, or transaction that was not posted before closing."
+    results.some(result => !result.match)
+      ? "Please check for any cash-in/cash-out, replenishment, transfer, expense, or transaction that was not posted before closing."
+      : 'Formal resolution overlay applied; original locked cash count remains unchanged.'
   );
 
   return lines.join(
@@ -1890,7 +1901,8 @@ async function runShiftAudit(
         results,
         tickets,
         expenseEntries,
-        cashMovementEntries
+        cashMovementEntries,
+        appliedCorrections: correctionResult.applied
       });
 
     if (dryRun) {
@@ -2519,6 +2531,7 @@ module.exports = {
   runCloseVsOpenCheck,
   buildExpenseAdjustments,
   expenseForexPhpEffect,
+  buildShiftMath,
   currencyHeading,
   resolutionOverlaysForCounts,
   isScheduledOpening,

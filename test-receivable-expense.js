@@ -5,7 +5,7 @@ const {
   parseTransaction
 } = require('./parse');
 const { reconcile } = require('./reconcile');
-const { buildExpenseAdjustments, expenseForexPhpEffect } = require('./audit');
+const { buildExpenseAdjustments, expenseForexPhpEffect, buildShiftMath } = require('./audit');
 
 const alphalandReceivable = parseExpenseEntry(`
 Expense ID: ALP-20260907-003
@@ -236,6 +236,19 @@ assert.deepEqual(
   'foreign Owner Collection must reduce only its actual drawer currency'
 );
 
+const resolvedMath = buildShiftMath({
+  branchConfig: { name: 'Alphaland' },
+  openingTotals: { THB: 500 },
+  closingTotals: { THB: 500 },
+  results: [{ ccy: 'THB', expected: 500, actual: 500, diff: 0, match: true }],
+  tickets: [], expenseEntries: [], cashMovementEntries: [],
+  appliedCorrections: [{ currency: 'THB', originalValue: 0, correctedValue: 500 }]
+});
+assert.match(resolvedMath, /Resolved Opening Correction: THB 0 → THB 500/);
+assert.match(resolvedMath, /Expected closing: \*฿500\.00\*/);
+assert.match(resolvedMath, /Actual closing:\s+\*฿500\.00\*/);
+assert.match(resolvedMath, /Difference:\s+\*฿0\.00\*/);
+
 console.log('foreign-currency receivable reconciliation: PASS');
 console.log('actual TWD NT$ cash-count format: PASS');
 console.log('Scratch-funded SMART receivable exclusion: PASS');
@@ -245,3 +258,4 @@ console.log('unrelated overall discrepancy preserved: PASS');
 console.log('ordinary expense and replenishment regression: PASS');
 console.log('structured expense direction and fund scope: PASS');
 console.log('foreign-currency Owner Collection fund movement: PASS');
+console.log('resolved opening correction full-math reporting: PASS');
