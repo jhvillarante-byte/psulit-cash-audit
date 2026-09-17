@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test-receivable-expense.js && node test-alphaland-sept9.js && node test-corrections.js && node test-transaction-corrections.js && node test-admin-actions.js && node test-discrepancy-resolutions.js && node test-resolution-overlays.js && node test-slack-boundaries.js && node test-lottomatik-summary.js && node test-balance-preview-opening.js && node test-balance-telegram.js && node test-hive-diagnostic.js"
+    "test": "node test-receivable-expense.js && node test-alphaland-sept9.js && node test-corrections.js && node test-transaction-corrections.js && node test-transaction-parser-running-balance.js && node test-admin-actions.js && node test-discrepancy-resolutions.js && node test-resolution-overlays.js && node test-slack-boundaries.js && node test-lottomatik-summary.js && node test-balance-preview-opening.js && node test-balance-telegram.js && node test-hive-diagnostic.js"
   },
   "dependencies": {
     "axios": "^1.7.2",

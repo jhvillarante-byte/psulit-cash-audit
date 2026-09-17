@@ -319,20 +319,40 @@ function parseTransaction(text) {
     return null;
   }
 
-  // Prefer an explicit TOTAL for multi-currency tickets.
+  // Prefer settlement amounts captured on the actual BUY/SELL lines. Older
+  // Transaction Entry messages may append running-balance lines such as
+  // "PHP: -₱6,261.00 → Balance: ₱109,917.93"; those balances are never
+  // transaction amounts and must not participate in this extraction.
+  const lineSettlementAmounts = movements.map(movement => movement.phpAmount);
+
+  let phpAmount = null;
+
+  if (lineSettlementAmounts.every(amount => Number.isFinite(amount))) {
+    phpAmount = lineSettlementAmounts.reduce(
+      (sum, amount) => sum + Math.abs(amount),
+      0
+    );
+  }
+
+  // Fall back to an explicit TOTAL only when line-level settlement is not
+  // available.
   const totalMatch = text.match(
     /TOTAL\s*:?\s*[₱P]?\s*([\d,]+\.?\d*)/i
   );
 
-  let phpAmount = null;
-
-  if (totalMatch) {
+  if (phpAmount == null && totalMatch) {
     phpAmount = parseFloat(
       totalMatch[1].replace(/,/g, '')
     );
-  } else {
+  } else if (phpAmount == null) {
+    // Last-resort legacy fallback: exclude any line containing Balance so a
+    // running balance can never become the transaction amount.
+    const transactionLines = String(text)
+      .split(/\r?\n/)
+      .filter(line => !/\bBalance\s*:/i.test(line))
+      .join('\n');
     const phpMatches = [
-      ...text.matchAll(
+      ...transactionLines.matchAll(
         /(?:₱|=\s*)\s*([\d,]+\.?\d*)/g
       )
     ];
