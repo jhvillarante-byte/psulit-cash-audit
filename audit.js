@@ -892,7 +892,9 @@ function buildStructuredHiveMovements(movements, oldestTs = -Infinity, latestTs 
         category: movement.category,
         ts,
         amount: effect.amount,
-        direction: effect.direction
+        direction: effect.direction,
+        sourceFund: movement.fundDrawerUsed || null,
+        destinationFund: movement.destinationFund || null
       });
     }
   }
@@ -1773,7 +1775,12 @@ function buildShiftMath({
       lines.push('⚠️ Structured Hive movement feed unavailable.');
     } else {
       lines.push(`Opening: ${moneyLabel('PHP', hiveAudit.previous)}`);
-      for (const movement of hiveAudit.movements || []) lines.push(`${movement.amount >= 0 ? '+' : '-'} ${movement.reference}: ${moneyLabel('PHP', Math.abs(movement.amount))}${movement.legacy ? ' (legacy)' : ''}`);
+      for (const movement of hiveAudit.movements || []) {
+        const label = `${movement.reference}${movement.legacy ? ' (legacy)' : ''}`;
+        const route = movement.sourceFund && movement.destinationFund ? ` — ${movement.sourceFund} → ${movement.destinationFund}` : '';
+        const sign = movement.amount >= 0 ? '+' : '-';
+        lines.push(`${label}${route}: ${sign}${moneyLabel('PHP', Math.abs(movement.amount))}`);
+      }
       lines.push(`Expected: ${moneyLabel('PHP', hiveAudit.expected)}`);
       lines.push(`Actual: ${moneyLabel('PHP', hiveAudit.actual)}`);
       lines.push(`Difference: ${moneyLabel('PHP', hiveAudit.difference)} — ${hiveAudit.status}`);
