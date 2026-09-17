@@ -1470,7 +1470,14 @@ function buildShiftMath({
   appliedCorrections = []
 }) {
   const correctedCurrencies = new Set(appliedCorrections.map(correction => correction.currency));
-  const mathResults = results.filter(result => !result.match || correctedCurrencies.has(result.ccy));
+  let mathResults = results.filter(result => !result.match || correctedCurrencies.has(result.ccy));
+
+  // Keep a compact, auditable Full Math thread available even when every
+  // currency reconciles. Discrepancy reports still prioritize only the
+  // affected currencies above; a fully reconciled audit includes all results.
+  if (!mathResults.length) {
+    mathResults = results;
+  }
 
   if (
     !mathResults.length
