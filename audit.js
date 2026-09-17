@@ -2485,6 +2485,125 @@ async function runCloseVsOpenCheck(
   }
 }
 
+// Read-only balance preview used by Transaction Entry.  This deliberately
+// reuses the same Slack parsing/correction rules as the audit instead of
+// maintaining a second balance calculator.  It never posts, writes, or
+// changes any audit state.
+async function previewPostTransactionBalance({
+  branchConfig,
+  lines,
+  totalPhpAmount,
+  arNumber,
+  asOfTs = (Date.now() / 1000).toFixed(6)
+}) {
+  if (!branchConfig?.cashCountChannelId || !branchConfig?.transactionsChannelId) {
+    throw new Error('Balance preview is not configured for this branch.');
+  }
+
+  async function messagesBefore(channelId, latestTs) {
+    const result = [];
+    let latest = latestTs;
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const pageMessages = await history(channelId, { latest, limit: PAGE_SIZE });
+      if (!pageMessages.length) break;
+      result.push(...pageMessages.filter(m => Number(m.ts) <= Number(asOfTs)));
+      if (pageMessages.length < PAGE_SIZE) break;
+      latest = (Number(pageMessages[pageMessages.length - 1].ts) - 0.000001).toFixed(6);
+    }
+    return result;
+  }
+
+  const countMessages = await messagesBefore(branchConfig.cashCountChannelId, asOfTs);
+  const latestCountMessage = countMessages
+    .map(message => ({ message, parsed: parseCashCount(message.text || '') }))
+    .filter(item => item.parsed && item.parsed.branch === branchConfig.name && item.parsed.refCode)
+    .sort((a, b) => Number(b.message.ts) - Number(a.message.ts))[0];
+
+  if (!latestCountMessage) {
+    return { authoritative: false, reason: 'No valid Cash Count found for this branch.' };
+  }
+
+  const latestCount = { ...latestCountMessage.parsed, _ts: latestCountMessage.message.ts };
+  const overlays = await resolutionOverlaysForCounts(branchConfig.cashCountChannelId, [latestCount]);
+  const effectiveCount = applyApprovedOpeningCorrections(
+    latestCount,
+    [...APPROVED_CORRECTIONS, ...overlays]
+  ).effectiveTotals;
+  const balances = stripUntracked({ ...effectiveCount, ...latestCount.others });
+  const oldestTs = latestCount._ts;
+
+  const txMessages = await messagesBefore(branchConfig.transactionsChannelId, asOfTs);
+  const tickets = txMessages
+    .filter(message => Number(message.ts) > Number(oldestTs) && TICKET_RE.test(message.text || ''))
+    .map(message => {
+      const original = parseTransaction(message.text || '');
+      if (!original) return null;
+      return {
+        message,
+        parsed: applyApprovedTransactionCorrections(original).effectiveTransaction,
+        ref: String(original.ref || '')
+      };
+    })
+    .filter(Boolean);
+
+  for (const ticket of tickets) {
+    for (const movement of ticket.parsed.movements || []) {
+      const sign = movement.action === 'BUY' ? 1 : -1;
+      balances[movement.ccy] = (balances[movement.ccy] || 0) + sign * movement.fcyAmount;
+    }
+    balances.PHP = (balances.PHP || 0) + transactionPhpEffect(ticket.parsed);
+  }
+
+  // Apply the same supported non-ticket cash movements the audit uses.  If a
+  // source cannot be parsed, it is intentionally not guessed into the preview.
+  const generalMessages = countMessages.filter(message => Number(message.ts) > Number(oldestTs));
+  for (const message of generalMessages) {
+    const movement = parseForexFundMovement(message.text || '');
+    if (movement) balances[movement.ccy] = (balances[movement.ccy] || 0) + movement.amount;
+  }
+
+  if (branchConfig.expensesChannelId) {
+    const expenseMessages = await messagesBefore(branchConfig.expensesChannelId, asOfTs);
+    const expenseEntries = expenseMessages
+      .filter(message => Number(message.ts) > Number(oldestTs))
+      .map(message => parseExpenseEntry(message.text || ''))
+      .filter(Boolean);
+    const expenseAdjustments = buildExpenseAdjustments(expenseEntries, expenseEntries.reduce(
+      (sum, entry) => sum + expenseForexPhpEffect(entry), 0
+    ));
+    for (const [ccy, amount] of Object.entries(expenseAdjustments)) {
+      balances[ccy] = (balances[ccy] || 0) + amount;
+    }
+  }
+
+  const proposed = {
+    movements: (lines || []).map(line => ({
+      action: String(line.deal || '').toUpperCase(),
+      ccy: String(line.currency || '').toUpperCase(),
+      fcyAmount: Number(line.fxAmount),
+      phpAmount: Number(line.phpAmount)
+    })),
+    phpAmount: Number(totalPhpAmount)
+  };
+  const alreadyPosted = arNumber && tickets.some(ticket => ticket.ref === String(arNumber).replace(/^0+/, '') || ticket.ref === String(arNumber));
+  if (!alreadyPosted) {
+    for (const movement of proposed.movements) {
+      const sign = movement.action === 'BUY' ? 1 : -1;
+      balances[movement.ccy] = (balances[movement.ccy] || 0) + sign * movement.fcyAmount;
+    }
+    balances.PHP = (balances.PHP || 0) + transactionPhpEffect(proposed);
+  }
+
+  const affected = new Set(proposed.movements.map(movement => movement.ccy));
+  affected.add('PHP');
+  return {
+    authoritative: true,
+    sourceCashCount: { refCode: latestCount.refCode, slackTs: latestCount._ts },
+    alreadyPosted,
+    balances: [...affected].map(ccy => ({ ccy, balance: balances[ccy] || 0 }))
+  };
+}
+
 module.exports = {
   runShiftAudit,
   runCloseVsOpenCheck,
@@ -2496,5 +2615,6 @@ module.exports = {
   currencyHeading,
   resolutionOverlaysForCounts,
   isScheduledOpening,
-  isScheduledClosing
+  isScheduledClosing,
+  previewPostTransactionBalance
 };

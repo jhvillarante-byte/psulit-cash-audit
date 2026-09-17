@@ -4,7 +4,8 @@ const {
   runShiftAudit,
   runCloseVsOpenCheck,
   isScheduledOpening,
-  isScheduledClosing
+  isScheduledClosing,
+  previewPostTransactionBalance
 } = require('./audit');
 
 const express = require('express');
@@ -46,6 +47,9 @@ const app = express();
 
 const SIGNING_SECRET =
   process.env.SLACK_SIGNING_SECRET;
+
+const BALANCE_PREVIEW_SECRET =
+  process.env.BALANCE_PREVIEW_SECRET || '';
 
 const RECIPIENT_CHAT_IDS =
   (
@@ -138,6 +142,29 @@ app.use(
       }
   })
 );
+
+function hasValidBalancePreviewSecret(req) {
+  const supplied = String(req.get('x-balance-preview-secret') || '');
+  if (!BALANCE_PREVIEW_SECRET || supplied.length !== BALANCE_PREVIEW_SECRET.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(BALANCE_PREVIEW_SECRET));
+}
+
+// Internal, read-only endpoint for Transaction Entry. It never posts to
+// Slack/Telegram and is intentionally protected by a server-only secret.
+app.post('/internal/balance-preview', async (req, res) => {
+  if (!hasValidBalancePreviewSecret(req)) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const { branch, lines, totalPhpAmount, arNumber } = req.body || {};
+    const branchConfig = BRANCHES.find(item => item.name.toLowerCase() === String(branch || '').toLowerCase());
+    if (!branchConfig) return res.status(400).json({ error: 'Invalid branch' });
+    const result = await previewPostTransactionBalance({ branchConfig, lines, totalPhpAmount, arNumber });
+    if (!result.authoritative) return res.status(503).json(result);
+    return res.json(result);
+  } catch (err) {
+    console.error('Balance preview failed:', err.message);
+    return res.status(503).json({ authoritative: false, reason: 'Balance preview unavailable.' });
+  }
+});
 
 app.use(
   express.urlencoded({
