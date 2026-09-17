@@ -787,6 +787,51 @@ function parseForexFundMovement(
   return null;
 }
 
+function structuredMovementEffect(entry) {
+  if (!entry || entry.status && entry.status !== 'Posted') return [];
+  const legs = [];
+  const add = (ccy, amount, fund, assetType) => {
+    if (fund !== 'Forex Drawer' || assetType !== 'Physical Cash') return;
+    const value = Number(amount);
+    if (ccy && Number.isFinite(value) && value !== 0) legs.push({ ccy: String(ccy).toUpperCase(), amount: value });
+  };
+  const source = () => add(entry.actualCurrency, -Number(entry.actualAmount), entry.fundDrawerUsed, entry.assetType);
+  const destination = () => add(entry.receivedCurrency || entry.actualCurrency, entry.receivedAmount ?? entry.actualAmount, entry.destinationFund || entry.fundDrawerUsed, entry.receivedAssetType || entry.assetType);
+  switch (entry.category) {
+    case 'Receivable Settlement':
+      if (entry.settlementMethod === 'Cash Received') destination();
+      break;
+    case 'Internal Transfer':
+    case 'Currency Exchange':
+      source();
+      destination();
+      break;
+    case 'Inter-Branch Transfer IN':
+      destination();
+      break;
+    case 'Inter-Branch Transfer OUT':
+      source();
+      break;
+    default:
+      source();
+      break;
+  }
+  return legs;
+}
+
+async function fetchStructuredMovementFeed(branchConfig, oldestTs, asOfTs) {
+  if (!branchConfig?.expenseMovementsUrl || !branchConfig?.expenseMovementsSecret) return null;
+  const url = new URL(branchConfig.expenseMovementsUrl);
+  url.searchParams.set('branch', branchConfig.name);
+  url.searchParams.set('afterUtc', new Date(Number(oldestTs) * 1000).toISOString());
+  url.searchParams.set('beforeUtc', new Date(Number(asOfTs) * 1000).toISOString());
+  const response = await fetch(url, { headers: { 'x-expense-movements-secret': branchConfig.expenseMovementsSecret } });
+  if (!response.ok) throw new Error(`Expense movement feed returned HTTP ${response.status}.`);
+  const payload = await response.json();
+  if (!payload || payload.authoritative !== true || !Array.isArray(payload.movements)) throw new Error('Expense movement feed returned an invalid payload.');
+  return payload.movements;
+}
+
 function transactionEffectForCurrency(
   tx,
   ccy
@@ -2562,7 +2607,23 @@ async function previewPostTransactionBalance({
     if (movement) balances[movement.ccy] = (balances[movement.ccy] || 0) + movement.amount;
   }
 
-  if (branchConfig.expensesChannelId) {
+  let structuredMovementsUsed = false;
+  if (branchConfig.expenseMovementsUrl && branchConfig.expenseMovementsSecret) {
+    try {
+      const structuredMovements = await fetchStructuredMovementFeed(branchConfig, oldestTs, asOfTs);
+      const seen = new Set();
+      for (const entry of structuredMovements) {
+        if (!entry?.expenseId || seen.has(entry.expenseId)) continue;
+        seen.add(entry.expenseId);
+        for (const leg of structuredMovementEffect(entry)) balances[leg.ccy] = (balances[leg.ccy] || 0) + leg.amount;
+      }
+      structuredMovementsUsed = true;
+    } catch (error) {
+      console.warn('Structured Expense App movement feed unavailable; using legacy Slack expense fallback.', { message: error?.message || String(error) });
+    }
+  }
+
+  if (!structuredMovementsUsed && branchConfig.expensesChannelId) {
     const expenseMessages = await messagesBefore(branchConfig.expensesChannelId, asOfTs);
     const expenseEntries = expenseMessages
       .filter(message => Number(message.ts) > Number(oldestTs))
@@ -2620,5 +2681,6 @@ module.exports = {
   resolutionOverlaysForCounts,
   isScheduledOpening,
   isScheduledClosing,
-  previewPostTransactionBalance
+  previewPostTransactionBalance,
+  structuredMovementEffect
 };

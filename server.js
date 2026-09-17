@@ -51,6 +51,12 @@ const SIGNING_SECRET =
 const BALANCE_PREVIEW_SECRET =
   process.env.BALANCE_PREVIEW_SECRET || '';
 
+const EXPENSE_MOVEMENTS_URL =
+  process.env.EXPENSE_MOVEMENTS_URL || '';
+
+const EXPENSE_MOVEMENTS_SECRET =
+  process.env.EXPENSE_MOVEMENTS_SECRET || '';
+
 const RECIPIENT_CHAT_IDS =
   (
     process.env.TELEGRAM_CHAT_IDS ||
@@ -98,7 +104,9 @@ const BRANCHES =
             null,
           expensesChannelId:
             expensesChannelId ||
-            null
+            null,
+          expenseMovementsUrl: EXPENSE_MOVEMENTS_URL || null,
+          expenseMovementsSecret: EXPENSE_MOVEMENTS_SECRET || null
         };
       }
     );
