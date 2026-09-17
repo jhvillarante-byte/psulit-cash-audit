@@ -42,6 +42,7 @@ const { CALLBACK_ID, createResolutionWorkflow } = require('./discrepancy-resolut
 const { broadcast } = require('./telegram');
 const { sendMessage } = require('./telegram');
 const { formatBalanceTelegramMessage, BalanceNotificationTracker } = require('./balance-telegram');
+const { checkpointType, analyzeHiveWindow, formatDiagnosticReport } = require('./hive-diagnostic');
 const { createLottomatikRouter } = require('./lottomatik-routes');
 const { PostgresDeliveryState } = require('./lottomatik-postgres-state');
 
@@ -144,6 +145,49 @@ registerDebugRoutes(
 
 const PROCESSED =
   new Set();
+
+function authorizedManager(userId) {
+  return new Set(String(process.env.SLACK_MANAGER_USER_IDS || '').split(',').map(value => value.trim()).filter(Boolean)).has(userId);
+}
+
+async function collectChannelHistory(channelId) {
+  const messages = [];
+  let latest;
+  for (let page = 0; page < 10; page++) {
+    const batch = await history(channelId, { latest, limit: 200 });
+    if (!batch.length) break;
+    messages.push(...batch);
+    if (batch.length < 200) break;
+    latest = (Number(batch[batch.length - 1].ts) - 0.000001).toFixed(6);
+  }
+  return messages;
+}
+
+async function runHiveDiagnostic() {
+  const reports = [];
+  for (const branchConfig of BRANCHES) {
+    if (!branchConfig.hiveChannelId || !branchConfig.cashCountChannelId) continue;
+    const [cashMessages, hiveMessages] = await Promise.all([
+      collectChannelHistory(branchConfig.cashCountChannelId),
+      collectChannelHistory(branchConfig.hiveChannelId)
+    ]);
+    const counts = cashMessages
+      .map(message => ({ message, parsed: parseCashCount(message.text || '') }))
+      .filter(item => item.parsed && item.parsed.branch === branchConfig.name && item.parsed.refCode && checkpointType(item.parsed))
+      .sort((a, b) => Number(a.message.ts) - Number(b.message.ts));
+    for (let i = 1; i < counts.length; i++) {
+      const previous = counts[i - 1];
+      const current = counts[i];
+      const validWindow = (checkpointType(previous.parsed) === 'Opening' && checkpointType(current.parsed) === 'Midshift') ||
+        (checkpointType(previous.parsed) === 'Midshift' && checkpointType(current.parsed) === 'Closing');
+      if (!validWindow) continue;
+      const windowHiveMessages = hiveMessages.filter(message => Number(message.ts) > Number(previous.message.ts) && Number(message.ts) <= Number(current.message.ts));
+      reports.push({ branch: branchConfig.name, ...analyzeHiveWindow(previous, current, windowHiveMessages) });
+    }
+  }
+  const reliable = reports.length > 0 && reports.every(report => report.status === 'MATCH' && report.parseFailures === 0 && report.suspectedDuplicates.length === 0);
+  return `${reports.length ? reports.map(report => formatDiagnosticReport(report.branch, [report])).join('\n\n') : 'No completed Hive checkpoint windows found.'}\n\nData reliable for permanent automation: ${reliable ? 'YES' : 'NO'}`;
+}
 
 const OPEN_FLAGS =
   new Map();
@@ -302,6 +346,26 @@ const discrepancyResolutionWorkflow = createResolutionWorkflow({
 
 app.post('/slack/interactions', async (req, res) => {
   if (!verifySlackSignature(req)) return res.status(401).send('invalid signature');
+
+  // Temporary, read-only owner/manager diagnostic. Slack signs the request;
+  // the manager allow-list is the second authorization check. Acknowledge
+  // immediately, then deliver the sanitized result ephemerally.
+  if (req.body?.command === '/hive-audit-diagnostic') {
+    const userId = String(req.body.user_id || '');
+    const channelId = String(req.body.channel_id || '');
+    if (!authorizedManager(userId)) {
+      await postEphemeral(channelId, userId, 'You are not authorized to run the Hive Commission audit diagnostic.').catch(() => {});
+      return res.status(200).send();
+    }
+    res.status(200).send();
+    runHiveDiagnostic()
+      .then(report => postEphemeral(channelId, userId, report))
+      .catch(() => {
+        postEphemeral(channelId, userId, 'Hive Commission audit diagnostic failed. No data was changed.').catch(() => {});
+      });
+    return;
+  }
+
   let payload;
   try {
     payload = JSON.parse(req.body?.payload || '{}');
