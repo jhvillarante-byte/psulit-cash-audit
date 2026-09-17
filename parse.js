@@ -193,7 +193,7 @@ function extractCurrencyBlocks(section) {
   // :flag-ph: PHP: ₱341,699.64
   if (headers.length === 0) {
     const flatLineRegex =
-      /:[\w-]+:\s*([A-Z]{3}):\s*(?:₱|\$|€|£|¥|HK\$|S\$|NT\$|A\$|C\$|Rp|SR|฿|₩)?\s*([\d,]+\.?\d*)/g;
+      /:[\w-]+:\s*([A-Z]{3}):\s*(?:₱|\$|€|£|¥|HK\$|S\$|NT\$|A\$|C\$|Rp|SR|Fr|฿|₩)?\s*([\d,]+\.?\d*)/g;
 
     let flatMatch;
 
