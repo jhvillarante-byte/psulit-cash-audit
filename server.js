@@ -40,6 +40,8 @@ const { executeApprovedAdminAction } = require('./admin-actions');
 const { CALLBACK_ID, createResolutionWorkflow } = require('./discrepancy-resolutions');
 
 const { broadcast } = require('./telegram');
+const { sendMessage } = require('./telegram');
+const { formatBalanceTelegramMessage, BalanceNotificationTracker } = require('./balance-telegram');
 const { createLottomatikRouter } = require('./lottomatik-routes');
 const { PostgresDeliveryState } = require('./lottomatik-postgres-state');
 
@@ -68,6 +70,8 @@ const RECIPIENT_CHAT_IDS =
         s.trim()
     )
     .filter(Boolean);
+
+const BALANCE_TELEGRAM_CHAT_ID = String(process.env.BALANCE_TELEGRAM_CHAT_ID || '').trim();
 
 const BRANCHES =
   (
@@ -121,6 +125,13 @@ const BY_CASH_COUNT_CHANNEL =
     )
   );
 
+const BY_TRANSACTION_CHANNEL =
+  new Map(
+    BRANCHES.map(
+      b => [b.transactionsChannelId, b]
+    )
+  );
+
 registerTestRoutes(
   app,
   BRANCHES
@@ -155,6 +166,49 @@ function hasValidBalancePreviewSecret(req) {
   const supplied = String(req.get('x-balance-preview-secret') || '');
   if (!BALANCE_PREVIEW_SECRET || supplied.length !== BALANCE_PREVIEW_SECRET.length) return false;
   return crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(BALANCE_PREVIEW_SECRET));
+}
+
+async function notifyTransactionBalance(event, branchConfig) {
+  if (!BALANCE_TELEGRAM_CHAT_ID) {
+    console.warn('Running balance Telegram notification omitted: BALANCE_TELEGRAM_CHAT_ID is not configured.', { branch: branchConfig.name, eventTs: event.ts });
+    return;
+  }
+  const parsed = parseTransaction(event.text || '');
+  if (!parsed || !parsed.movements?.length || !Number.isFinite(Number(parsed.phpAmount))) {
+    console.warn('Running balance Telegram notification omitted: transaction could not be parsed.', { branch: branchConfig.name, eventTs: event.ts });
+    return;
+  }
+  const key = `${branchConfig.name}|${event.ts}|${parsed.ref}`;
+  if (!BALANCE_NOTIFICATIONS.begin(key)) {
+    console.info('Running balance Telegram notification duplicate skipped.', { branch: branchConfig.name, ar: parsed.ref });
+    return;
+  }
+  try {
+    const result = await previewPostTransactionBalance({
+      branchConfig,
+      lines: parsed.movements.map(movement => ({ deal: movement.action, currency: movement.ccy, fxAmount: movement.fcyAmount, phpAmount: movement.phpAmount })),
+      totalPhpAmount: parsed.phpAmount,
+      arNumber: parsed.ref,
+      asOfTs: event.ts
+    });
+    if (!result?.authoritative) {
+      BALANCE_NOTIFICATIONS.failed(key);
+      console.warn('Running balance Telegram notification omitted: authoritative calculation unavailable.', { branch: branchConfig.name, ar: parsed.ref, reason: result?.reason || 'unknown' });
+      return;
+    }
+    const message = formatBalanceTelegramMessage({ branch: branchConfig.name, arNumber: parsed.ref, lines: parsed.movements, balances: result.balances });
+    if (!message) {
+      BALANCE_NOTIFICATIONS.failed(key);
+      console.warn('Running balance Telegram notification omitted: no affected balances returned.', { branch: branchConfig.name, ar: parsed.ref });
+      return;
+    }
+    await sendMessage(BALANCE_TELEGRAM_CHAT_ID, message);
+    BALANCE_NOTIFICATIONS.succeeded(key);
+    console.info('Running balance Telegram notification sent.', { branch: branchConfig.name, ar: parsed.ref });
+  } catch (error) {
+    BALANCE_NOTIFICATIONS.failed(key);
+    console.error('Running balance Telegram notification failed.', { branch: branchConfig.name, ar: parsed.ref, message: error?.message || String(error) });
+  }
 }
 
 // Internal, read-only endpoint for Transaction Entry. It never posts to
@@ -369,6 +423,20 @@ app.post(
     console.log(
       `Received message in ${event.channel} (subtype: ${event.subtype || 'none'}): ${event.text.slice(0, 60)}`
     );
+
+    const transactionBranch =
+      BY_TRANSACTION_CHANNEL.get(
+        event.channel
+      );
+
+    if (transactionBranch) {
+      // Slack has already received the event and the HTTP 200 was sent above.
+      // Balance calculation/Telegram delivery is deliberately fire-and-forget.
+      notifyTransactionBalance(event, transactionBranch).catch(err =>
+        console.error('Running balance notification task failed:', err.message)
+      );
+      return;
+    }
 
     const branchConfig =
       BY_CASH_COUNT_CHANNEL.get(
@@ -2266,6 +2334,8 @@ app.get(
 const PORT =
   process.env.PORT ||
   3000;
+
+const BALANCE_NOTIFICATIONS = new BalanceNotificationTracker();
 
 app.listen(
   PORT,
