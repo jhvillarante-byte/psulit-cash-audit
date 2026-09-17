@@ -81,7 +81,7 @@ function correctionFromResolution(reply, lockedCount, context = {}) {
     : payload.closing_ref;
   const targetRef = payload.affected_ref || (isEncodingCorrection ? legacyTargetRef : null);
   if (!targetRef || targetRef !== lockedCount?.refCode ||
-      !/^[A-Z]{3}$/.test(payload.currency || '')) return null;
+      !(/^[A-Z]{3}$/.test(payload.currency || '') || payload.currency === 'Hive')) return null;
   const correctedValue = payload.corrected_value != null && Number.isFinite(Number(payload.corrected_value))
     ? Number(payload.corrected_value)
     : isEncodingCorrection ? parseConfirmedBalance(reply.text) : null;

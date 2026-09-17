@@ -1283,14 +1283,6 @@ function buildShiftSummary({
 
   if ((appliedTransactionCorrections || []).length) lines.push('');
 
-  const matchedIdr = (results || []).find(result => result.ccy === 'IDR' && result.match);
-  if (matchedIdr) {
-    lines.push(
-      `✅ ${currencyHeading('IDR')} counted: expected ${moneyLabel('IDR', matchedIdr.expected)}; ` +
-      `actual ${moneyLabel('IDR', matchedIdr.actual)}.`
-    );
-  }
-
   if (
     expenseEntries.length
   ) {
@@ -1519,14 +1511,10 @@ function buildShiftMath({
   const correctedCurrencies = new Set(appliedCorrections.map(correction => correction.currency));
   let mathResults = results.filter(result => !result.match || correctedCurrencies.has(result.ccy));
 
-  // Keep a compact, auditable Full Math thread available even when every
-  // currency reconciles. Discrepancy reports still prioritize only the
-  // affected currencies above; a fully reconciled audit includes all results.
-  if (!mathResults.length) {
-    mathResults = results;
-  }
+  const hiveNeedsMath = hiveAudit && hiveAudit.status !== 'MATCH';
 
-  if (!mathResults.length && !hiveAudit) {
+  // Full Math is an exception detail, not a duplicate of a clean summary.
+  if (!mathResults.length && !hiveNeedsMath) {
     return '';
   }
 
@@ -1703,7 +1691,7 @@ function buildShiftMath({
 
   lines.push('');
 
-  if (hiveAudit) {
+  if (hiveNeedsMath) {
     lines.push('*🐝 Hive*');
     if (hiveAudit.status === 'UNAVAILABLE') {
       lines.push('⚠️ Structured Hive movement feed unavailable.');
@@ -2069,9 +2057,12 @@ async function runShiftAudit(
         0;
     }
 
+    const hiveClosingCorrection = resolutionCorrections.find(
+      correction => correction.currency === 'Hive' && correction.cashCountRef === closingCount?.refCode
+    );
     const hiveAudit = reconcileHiveCash({
       previous: openingCount?.others?.Hive,
-      actual: closingCount?.others?.Hive,
+      actual: hiveClosingCorrection ? hiveClosingCorrection.correctedValue : closingCount?.others?.Hive,
       movements: buildStructuredHiveMovements(structuredMovementsForHive || [], openingBoundaryTs, closingBoundaryTs),
       feedAvailable: structuredExpenseFeedUsed
     });
@@ -2137,20 +2128,33 @@ async function runShiftAudit(
         : report;
     }
 
+    const resolutionDiscrepancies = stillOpen.map(item => ({
+      channel: cashCountChannelId,
+      branch: branchConfig.name,
+      openingRef: openingCount.refCode,
+      closingRef: closingCount.refCode,
+      currency: item.ccy,
+      amount: Math.abs(item.diff),
+      direction: item.diff < 0 ? 'SHORT' : 'EXTRA'
+    }));
+    if (hiveAudit && hiveAudit.status !== 'MATCH' && hiveAudit.status !== 'UNAVAILABLE') {
+      resolutionDiscrepancies.push({
+        channel: cashCountChannelId,
+        branch: branchConfig.name,
+        openingRef: openingCount.refCode,
+        closingRef: closingCount.refCode,
+        currency: 'Hive',
+        amount: Math.abs(hiveAudit.difference),
+        direction: hiveAudit.difference < 0 ? 'SHORT' : 'EXTRA'
+      });
+    }
+
     const posted =
       await postMessage(
         cashCountChannelId,
         report,
         {
-          blocks: reportBlocks(report, stillOpen.map(item => ({
-            channel: cashCountChannelId,
-            branch: branchConfig.name,
-            openingRef: openingCount.refCode,
-            closingRef: closingCount.refCode,
-            currency: item.ccy,
-            amount: Math.abs(item.diff),
-            direction: item.diff < 0 ? 'SHORT' : 'EXTRA'
-          })))
+          blocks: reportBlocks(report, resolutionDiscrepancies)
         }
       );
 
