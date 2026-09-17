@@ -2598,7 +2598,11 @@ async function previewPostTransactionBalance({
   affected.add('PHP');
   return {
     authoritative: true,
-    sourceCashCount: { refCode: latestCount.refCode, slackTs: latestCount._ts },
+    sourceCashCount: {
+      refCode: latestCount.refCode,
+      phase: latestCount.phase,
+      slackTs: latestCount._ts
+    },
     alreadyPosted,
     balances: [...affected].map(ccy => ({ ccy, balance: balances[ccy] || 0 }))
   };

@@ -152,16 +152,33 @@ function hasValidBalancePreviewSecret(req) {
 // Internal, read-only endpoint for Transaction Entry. It never posts to
 // Slack/Telegram and is intentionally protected by a server-only secret.
 app.post('/internal/balance-preview', async (req, res) => {
-  if (!hasValidBalancePreviewSecret(req)) return res.status(401).json({ error: 'Unauthorized' });
+  const requestContext = {
+    branch: req.body && req.body.branch,
+    proposedAr: req.body && req.body.arNumber
+  };
+  const authenticated = hasValidBalancePreviewSecret(req);
+  console.info('Balance preview request received', { ...requestContext, authenticated });
+  if (!authenticated) {
+    console.warn('Balance preview authentication failed', requestContext);
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
   try {
     const { branch, lines, totalPhpAmount, arNumber } = req.body || {};
     const branchConfig = BRANCHES.find(item => item.name.toLowerCase() === String(branch || '').toLowerCase());
     if (!branchConfig) return res.status(400).json({ error: 'Invalid branch' });
     const result = await previewPostTransactionBalance({ branchConfig, lines, totalPhpAmount, arNumber });
-    if (!result.authoritative) return res.status(503).json(result);
+    if (!result.authoritative) {
+      console.warn('Balance preview Cash Count/calculation unavailable', { ...requestContext, reason: result.reason });
+      return res.status(503).json(result);
+    }
+    console.info('Balance preview succeeded', {
+      ...requestContext,
+      cashCount: result.sourceCashCount,
+      currencies: result.balances.map(item => item.ccy)
+    });
     return res.json(result);
   } catch (err) {
-    console.error('Balance preview failed:', err.message);
+    console.error('Balance preview failed', { ...requestContext, message: err.message });
     return res.status(503).json({ authoritative: false, reason: 'Balance preview unavailable.' });
   }
 });
