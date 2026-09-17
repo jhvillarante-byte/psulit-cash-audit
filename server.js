@@ -354,14 +354,14 @@ app.post('/slack/interactions', async (req, res) => {
     const userId = String(req.body.user_id || '');
     const channelId = String(req.body.channel_id || '');
     if (!authorizedManager(userId)) {
-      await postEphemeral(channelId, userId, 'You are not authorized to run the Hive Commission audit diagnostic.').catch(() => {});
+      await postEphemeral(channelId, userId, 'You are not authorized to run the Hive audit diagnostic.').catch(() => {});
       return res.status(200).send();
     }
     res.status(200).send();
     runHiveDiagnostic()
       .then(report => postEphemeral(channelId, userId, report))
       .catch(() => {
-        postEphemeral(channelId, userId, 'Hive Commission audit diagnostic failed. No data was changed.').catch(() => {});
+        postEphemeral(channelId, userId, 'Hive audit diagnostic failed. No data was changed.').catch(() => {});
       });
     return;
   }

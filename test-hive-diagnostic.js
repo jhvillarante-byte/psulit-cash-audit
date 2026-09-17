@@ -43,7 +43,7 @@ const duplicate = analyzeHiveWindow(previous, current, [
 assert.equal(duplicate.suspectedDuplicates.length, 1);
 
 const report = formatDiagnosticReport('Alphaland', [result]);
-assert.match(report, /Hive Commission Audit/);
+assert.match(report, /Hive Audit/);
 assert.match(report, /MATCH/);
 assert.match(report, /\+₱100\.00/);
 assert.doesNotMatch(report, /channel|token|teller|client/i);

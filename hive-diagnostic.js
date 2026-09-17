@@ -58,7 +58,7 @@ function analyzeHiveWindow(previous, current, hiveMessages) {
 }
 
 function formatDiagnosticReport(branch, windows) {
-  const lines = [`*Hive Commission Audit — ${branch}*`, ''];
+  const lines = [`*Hive Audit — ${branch}*`, ''];
   if (!windows.length) return lines.concat('No completed Opening → Midshift or Midshift → Closing windows found.').join('\n');
   for (const window of windows) {
     lines.push(`${window.previousType} → ${window.currentType}`);
