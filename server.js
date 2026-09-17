@@ -10,6 +10,7 @@ const {
 const express = require('express');
 const crypto = require('crypto');
 const axios = require('axios');
+const { Pool } = require('pg');
 
 const {
   parseCashCount,
@@ -38,6 +39,8 @@ const { executeApprovedAdminAction } = require('./admin-actions');
 const { CALLBACK_ID, createResolutionWorkflow } = require('./discrepancy-resolutions');
 
 const { broadcast } = require('./telegram');
+const { createLottomatikRouter } = require('./lottomatik-routes');
+const { PostgresDeliveryState } = require('./lottomatik-postgres-state');
 
 const app = express();
 
@@ -142,6 +145,46 @@ app.use(
     verify: (req, res, buf) => { req.rawBody = buf; }
   })
 );
+
+const ALPHALAND = BRANCHES.find(branch => branch.name === 'Alphaland');
+if (ALPHALAND) {
+  const lottomatikPool = process.env.SUPABASE_DATABASE_URL
+    ? new Pool({
+        connectionString: process.env.SUPABASE_DATABASE_URL,
+        max: 2,
+        min: 0,
+        connectionTimeoutMillis: 10000,
+        idleTimeoutMillis: 10000,
+        allowExitOnIdle: true,
+        keepAlive: true
+      })
+    : null;
+  if (lottomatikPool) {
+    lottomatikPool.on('error', error =>
+      console.error('LottoMatik database pool error:', error.code || error.name || 'database_error')
+    );
+  }
+  const lottomatikState = lottomatikPool
+    ? new PostgresDeliveryState(lottomatikPool)
+    : {
+        get: async () => null,
+        ensure: async () => { throw new Error('Supabase LottoMatik delivery storage is not configured.'); }
+      };
+  app.use('/lottomatik', createLottomatikRouter({
+    env: process.env,
+    branch: ALPHALAND,
+    history,
+    state: lottomatikState,
+    postSlack: (channelId, text) => postMessage(channelId, text),
+    postTelegram: async text => {
+      if (!RECIPIENT_CHAT_IDS.length) throw new Error('Telegram recipients are not configured.');
+      const results = await broadcast(RECIPIENT_CHAT_IDS, text);
+      const failed = results.find(result => result.status === 'rejected');
+      if (failed) throw new Error('Telegram delivery failed.');
+      return { message_id: results.map(result => result.value && result.value.result && result.value.result.message_id).filter(Boolean).join(',') };
+    }
+  }));
+}
 
 const discrepancyResolutionWorkflow = createResolutionWorkflow({
   threadReplies,
