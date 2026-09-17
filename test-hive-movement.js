@@ -15,7 +15,9 @@ assert.strictEqual(movements[1].amount, -1500);
 assert.strictEqual(movements[0].reference, 'DMBR93PMDPR');
 assert.strictEqual(movements[2].amount, 20000);
 assert.strictEqual(movements[2].category, 'Internal Transfer');
+assert.strictEqual(movements[2].reference, 'SOL-20260917-003');
 assert.strictEqual(movements[3].amount, -14967.60);
+assert.strictEqual(movements[3].reference, 'SOL-20260917-002');
 const match = reconcileHiveCash({ previous: 91240.42, actual: 105772.82, movements, feedAvailable: true });
 assert.strictEqual(match.status, 'MATCH');
 assert.ok(Math.abs(match.expected - 105772.82) < 0.005);
@@ -35,6 +37,7 @@ const legacy = buildLegacyHiveMovements([
 ], [{ expenseId: 'SOL-20260917-002', reference: 'AR 2501' }], 1789640000, 1789650000);
 assert.strictEqual(legacy.length, 1);
 assert.strictEqual(legacy[0].expenseId, 'SOL-20260917-003');
+assert.strictEqual(legacy[0].reference, 'SOL-20260917-003');
 assert.strictEqual(legacy[0].amount, 20000);
 assert.strictEqual(legacy[0].legacy, true);
 assert.strictEqual(reconcileHiveCash({ previous: 1, actual: 1, movements: [], feedAvailable: false }).status, 'UNAVAILABLE');

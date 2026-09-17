@@ -888,7 +888,7 @@ function buildStructuredHiveMovements(movements, oldestTs = -Infinity, latestTs 
     for (const effect of effects) {
       out.push({
         expenseId: id,
-        reference,
+        reference: /^Internal (?:Fund )?Transfer$/i.test(String(movement.category || '')) ? id : reference,
         category: movement.category,
         ts,
         amount: effect.amount,
@@ -915,7 +915,8 @@ function parseLegacyHiveInternalTransfer(text, ts) {
   if (fromHive === toHive) return null;
   return {
     expenseId: recordId,
-    reference: transferReference.trim().toUpperCase() || recordId,
+    reference: recordId,
+    transferReference: transferReference.trim().toUpperCase(),
     category: 'Internal Transfer',
     ts: Number(ts) || 0,
     amount: toHive ? amount : -amount,
