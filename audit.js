@@ -2611,6 +2611,12 @@ async function previewPostTransactionBalance({
   if (branchConfig.expenseMovementsUrl && branchConfig.expenseMovementsSecret) {
     try {
       const structuredMovements = await fetchStructuredMovementFeed(branchConfig, oldestTs, asOfTs);
+      console.info('Structured Expense App movement feed succeeded', {
+        branch: branchConfig.name,
+        movementCount: structuredMovements.length,
+        afterUtc: new Date(Number(oldestTs) * 1000).toISOString(),
+        beforeUtc: new Date(Number(asOfTs) * 1000).toISOString()
+      });
       const seen = new Set();
       for (const entry of structuredMovements) {
         if (!entry?.expenseId || seen.has(entry.expenseId)) continue;
