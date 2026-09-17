@@ -847,6 +847,42 @@ function structuredMovementEffect(entry) {
   return legs;
 }
 
+function buildStructuredHiveMovements(movements, oldestTs = -Infinity, latestTs = Infinity) {
+  const seen = new Set();
+  const out = [];
+  for (const movement of Array.isArray(movements) ? movements : []) {
+    if (!movement || !['Hive In', 'Hive Out'].includes(movement.category)) continue;
+    if (movement.fundDrawerUsed !== 'Hive' || movement.assetType !== 'Physical Cash' || String(movement.actualCurrency || '').toUpperCase() !== 'PHP') continue;
+    const id = String(movement.expenseId || movement.referenceId || '');
+    const reference = String(movement.hiveTransactionReference || movement.hive_transaction_reference || movement.transferReference || id).trim().toUpperCase();
+    const duplicateKey = `${movement.category}|${reference}`;
+    if (!id || seen.has(id) || seen.has(duplicateKey)) continue;
+    const ts = structuredMovementTimestamp(movement);
+    if (!ts || ts <= Number(oldestTs) || ts > Number(latestTs)) continue;
+    const amount = Number(movement.actualAmount);
+    if (!Number.isFinite(amount) || amount <= 0) continue;
+    seen.add(id); seen.add(duplicateKey);
+    out.push({
+      expenseId: id,
+      reference,
+      category: movement.category,
+      ts,
+      amount: movement.category === 'Hive In' ? amount : -amount
+    });
+  }
+  return out.sort((a, b) => a.ts - b.ts || a.expenseId.localeCompare(b.expenseId));
+}
+
+function reconcileHiveCash({ previous, actual, movements, feedAvailable }) {
+  if (!feedAvailable) return { status: 'UNAVAILABLE', previous: Number(previous) || 0, actual: Number(actual) || 0, movements: [], expected: null, difference: null };
+  if (previous == null || actual == null) return { status: 'UNAVAILABLE', previous: Number(previous) || 0, actual: Number(actual) || 0, movements: movements || [], expected: null, difference: null };
+  const opening = Number(previous) || 0;
+  const ending = Number(actual) || 0;
+  const net = (movements || []).reduce((sum, movement) => sum + movement.amount, 0);
+  const expected = opening + net;
+  return { status: Math.abs(ending - expected) < 0.005 ? 'MATCH' : 'DISCREPANCY', previous: opening, actual: ending, movements: movements || [], expected, difference: ending - expected };
+}
+
 function structuredMovementTimestamp(entry) {
   const value = entry?.timestamp || entry?.postedAt || entry?.createdAt || entry?.occurredAt ||
     entry?.submittedAtUtc || entry?.submittedAt || entry?.submitted_at_utc;
@@ -1148,7 +1184,8 @@ function buildShiftSummary({
   results,
   stillOpen,
   resolved,
-  dryRun
+  dryRun,
+  hiveAudit
 }) {
   const dateLabel =
     (
@@ -1336,6 +1373,15 @@ function buildShiftSummary({
     );
   }
 
+  if (hiveAudit) {
+    lines.push('');
+    if (hiveAudit.status === 'UNAVAILABLE') {
+      lines.push('⚠️ Hive audit unavailable — structured movement feed unavailable.');
+    } else {
+      lines.push(`${hiveAudit.status === 'MATCH' ? '✅' : '❌'} Hive ${hiveAudit.status === 'MATCH' ? 'reconciled' : 'discrepancy'}: Expected ${moneyLabel('PHP', hiveAudit.expected)} | Actual ${moneyLabel('PHP', hiveAudit.actual)} | Difference ${moneyLabel('PHP', hiveAudit.difference)}`);
+    }
+  }
+
   if (
     expenseEntries.length ||
     cashMovementEntries.length
@@ -1366,9 +1412,9 @@ function buildShiftSummary({
       `✅ All forex currencies reconciled. ${tickets.length} transactions checked.`
     );
 
-    lines.push(
-      'ℹ️ Scratch, JuanPay, Hive, Opex, and other funds are not yet fully reconciled.'
-    );
+    lines.push(hiveAudit?.status === 'MATCH'
+      ? 'ℹ️ Scratch, JuanPay, Opex, and other funds are not yet fully reconciled.'
+      : 'ℹ️ Scratch, JuanPay, Hive, Opex, and other funds are not yet fully reconciled.');
 
     return lines.join(
       '\n'
@@ -1467,7 +1513,8 @@ function buildShiftMath({
   tickets,
   expenseEntries,
   cashMovementEntries,
-  appliedCorrections = []
+  appliedCorrections = [],
+  hiveAudit
 }) {
   const correctedCurrencies = new Set(appliedCorrections.map(correction => correction.currency));
   let mathResults = results.filter(result => !result.match || correctedCurrencies.has(result.ccy));
@@ -1479,9 +1526,7 @@ function buildShiftMath({
     mathResults = results;
   }
 
-  if (
-    !mathResults.length
-  ) {
+  if (!mathResults.length && !hiveAudit) {
     return '';
   }
 
@@ -1658,6 +1703,20 @@ function buildShiftMath({
 
   lines.push('');
 
+  if (hiveAudit) {
+    lines.push('*🐝 Hive*');
+    if (hiveAudit.status === 'UNAVAILABLE') {
+      lines.push('⚠️ Structured Hive movement feed unavailable.');
+    } else {
+      lines.push(`Opening: ${moneyLabel('PHP', hiveAudit.previous)}`);
+      for (const movement of hiveAudit.movements || []) lines.push(`${movement.amount >= 0 ? '+' : '-'} ${movement.reference}: ${moneyLabel('PHP', Math.abs(movement.amount))}`);
+      lines.push(`Expected: ${moneyLabel('PHP', hiveAudit.expected)}`);
+      lines.push(`Actual: ${moneyLabel('PHP', hiveAudit.actual)}`);
+      lines.push(`Difference: ${moneyLabel('PHP', hiveAudit.difference)} — ${hiveAudit.status}`);
+    }
+    lines.push('');
+  }
+
   lines.push(
     results.some(result => !result.match)
       ? "Please check for any cash-in/cash-out, replenishment, transfer, expense, or transaction that was not posted before closing."
@@ -1767,6 +1826,7 @@ async function runShiftAudit(
       [];
 
     let structuredExpenseFeedUsed = false;
+    let structuredMovementsForHive = null;
     if (branchConfig.expenseMovementsUrl && branchConfig.expenseMovementsSecret) {
       try {
         const structuredMovements = await fetchStructuredMovementFeed(
@@ -1774,6 +1834,7 @@ async function runShiftAudit(
           openingBoundaryTs,
           closingBoundaryTs
         );
+        structuredMovementsForHive = structuredMovements;
         const structuredEntries = buildStructuredExpenseEntries(
           structuredMovements,
           openingBoundaryTs,
@@ -2008,6 +2069,13 @@ async function runShiftAudit(
         0;
     }
 
+    const hiveAudit = reconcileHiveCash({
+      previous: openingCount?.others?.Hive,
+      actual: closingCount?.others?.Hive,
+      movements: buildStructuredHiveMovements(structuredMovementsForHive || [], openingBoundaryTs, closingBoundaryTs),
+      feedAvailable: structuredExpenseFeedUsed
+    });
+
     const dateLabel =
       (
         closingCount.timestamp ||
@@ -2046,7 +2114,8 @@ async function runShiftAudit(
         results,
         stillOpen,
         resolved,
-        dryRun
+        dryRun,
+        hiveAudit
       });
 
     const math =
@@ -2058,7 +2127,8 @@ async function runShiftAudit(
         tickets,
         expenseEntries,
         cashMovementEntries,
-        appliedCorrections: correctionResult.applied
+        appliedCorrections: correctionResult.applied,
+        hiveAudit
       });
 
     if (dryRun) {
@@ -2839,6 +2909,8 @@ module.exports = {
   structuredMovementEffect,
   buildStructuredExpenseEntries,
   buildStructuredExpenseAdjustments,
+  buildStructuredHiveMovements,
+  reconcileHiveCash,
   manilaBusinessDateFromSlackTs,
   selectOpeningCashCountForPreview
 };
