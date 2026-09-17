@@ -54,6 +54,28 @@ const UNTRACKED_BUCKETS = [
 const SHIFT_AUDIT_FLAGS = new Map();
 const HANDOVER_FLAGS = new Map();
 
+function manilaBusinessDateFromSlackTs(ts) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Manila',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).format(new Date(Number(ts) * 1000));
+}
+
+function selectOpeningCashCountForPreview(countMessages, branchName, asOfTs) {
+  const businessDate = manilaBusinessDateFromSlackTs(asOfTs);
+  return countMessages
+    .map(message => ({ message, parsed: parseCashCount(message.text || '') }))
+    .filter(item => item.parsed
+      && item.parsed.branch === branchName
+      && item.parsed.refCode
+      && String(item.parsed.phase || '').toLowerCase() === 'opening'
+      && manilaBusinessDateFromSlackTs(item.message.ts) === businessDate
+      && Number(item.message.ts) <= Number(asOfTs))
+    .sort((a, b) => Number(b.message.ts) - Number(a.message.ts))[0] || null;
+}
+
 const CCY_SYMBOL = {
   PHP: '₱',
   USD: '$',
@@ -2559,10 +2581,14 @@ async function previewPostTransactionBalance({
   }
 
   const countMessages = await messagesBefore(branchConfig.cashCountChannelId, asOfTs);
-  const latestCountMessage = countMessages
-    .map(message => ({ message, parsed: parseCashCount(message.text || '') }))
-    .filter(item => item.parsed && item.parsed.branch === branchConfig.name && item.parsed.refCode)
-    .sort((a, b) => Number(b.message.ts) - Number(a.message.ts))[0];
+  // Transaction Entry previews always anchor to the same business day's
+  // morning Opening count. Midshift and Closing counts remain audit
+  // checkpoints and must not reset the continuous running balance.
+  const latestCountMessage = selectOpeningCashCountForPreview(
+    countMessages,
+    branchConfig.name,
+    asOfTs
+  );
 
   if (!latestCountMessage) {
     return { authoritative: false, reason: 'No valid Cash Count found for this branch.' };
@@ -2688,5 +2714,7 @@ module.exports = {
   isScheduledOpening,
   isScheduledClosing,
   previewPostTransactionBalance,
-  structuredMovementEffect
+  structuredMovementEffect,
+  manilaBusinessDateFromSlackTs,
+  selectOpeningCashCountForPreview
 };
