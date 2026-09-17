@@ -623,6 +623,12 @@ function buildExpenseAdjustments(
     const entry of
       expenseEntries
   ) {
+    if (entry.structuredLegs) {
+      for (const leg of entry.structuredLegs) {
+        adjustments[leg.ccy] = (adjustments[leg.ccy] || 0) + leg.amount;
+      }
+      continue;
+    }
     if (
       !entry.cashMovement ||
       entry.cashMovement.source !==
@@ -839,6 +845,58 @@ function structuredMovementEffect(entry) {
       break;
   }
   return legs;
+}
+
+function structuredMovementTimestamp(entry) {
+  const value = entry?.timestamp || entry?.postedAt || entry?.createdAt || entry?.occurredAt ||
+    entry?.submittedAtUtc || entry?.submittedAt || entry?.submitted_at_utc;
+  if (value == null) return 0;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0) return numeric > 1e12 ? numeric / 1000 : numeric;
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) ? parsed / 1000 : 0;
+}
+
+function structuredExpenseLabel(entry) {
+  const id = entry?.expenseId || entry?.referenceId || 'Expense movement';
+  const category = entry?.category || entry?.type || 'Expense';
+  return `${category} ${id}`;
+}
+
+function buildStructuredExpenseEntries(movements, oldestTs = -Infinity, latestTs = Infinity) {
+  const seen = new Set();
+  const entries = [];
+  for (const movement of Array.isArray(movements) ? movements : []) {
+    const id = movement?.expenseId || movement?.referenceId;
+    if (!id || seen.has(String(id))) continue;
+    seen.add(String(id));
+    const timestamp = structuredMovementTimestamp(movement);
+    if (!timestamp || timestamp <= Number(oldestTs) || timestamp > Number(latestTs)) continue;
+    const legs = structuredMovementEffect(movement);
+    if (!legs.length) continue;
+    const phpAmount = legs.filter(leg => leg.ccy === 'PHP').reduce((sum, leg) => sum + leg.amount, 0);
+    entries.push({
+      structured: true,
+      expenseId: String(id),
+      raw: structuredExpenseLabel(movement),
+      ts: timestamp,
+      structuredLegs: legs,
+      reconciliationAmount: phpAmount,
+      amount: phpAmount,
+      needsReview: false
+    });
+  }
+  return entries;
+}
+
+function buildStructuredExpenseAdjustments(entries) {
+  const adjustments = {};
+  for (const entry of entries || []) {
+    for (const leg of entry.structuredLegs || []) {
+      adjustments[leg.ccy] = (adjustments[leg.ccy] || 0) + leg.amount;
+    }
+  }
+  return adjustments;
 }
 
 async function fetchStructuredMovementFeed(branchConfig, oldestTs, asOfTs) {
@@ -1216,6 +1274,13 @@ function buildShiftSummary({
     );
 
     for (const entry of expenseEntries) {
+      if (entry.structuredLegs) {
+        const effects = entry.structuredLegs
+          .map(leg => `${leg.amount >= 0 ? '+' : '−'}${moneyLabel(leg.ccy, Math.abs(leg.amount))}`)
+          .join(', ');
+        lines.push(`💼 ${entry.raw}: ${effects}`);
+        continue;
+      }
       if (entry.isOwnerCollection && entry.cashMovement) {
         lines.push(
           `💼 ${expenseLabel(entry.raw)}: ${moneyLabel(entry.cashMovement.ccy, Math.abs(entry.cashMovement.amount))} ` +
@@ -1482,6 +1547,15 @@ function buildShiftMath({
 
     if (ccy !== 'PHP') {
       for (const entry of [...expenseEntries].sort((a, b) => parseFloat(a.ts) - parseFloat(b.ts))) {
+        if (entry.structuredLegs) {
+          for (const leg of entry.structuredLegs.filter(item => item.ccy === ccy)) {
+            relevant.push(leg.amount);
+            lines.push(
+              `${leg.amount >= 0 ? '+' : '-'} ${entry.raw}: ${moneyLabel(ccy, Math.abs(leg.amount))}`
+            );
+          }
+          continue;
+        }
         if (!entry.cashMovement || entry.cashMovement.ccy !== ccy ||
             entry.cashMovement.source !== 'Forex drawer') continue;
         const effect = entry.cashMovement.amount;
@@ -1507,6 +1581,14 @@ function buildShiftMath({
             parseFloat(b.ts)
         )
       ) {
+        if (e.structuredLegs) {
+          for (const leg of e.structuredLegs.filter(item => item.ccy === 'PHP')) {
+            lines.push(
+              `${leg.amount >= 0 ? '+' : '-'} ${e.raw}: ${moneyLabel('PHP', Math.abs(leg.amount))}`
+            );
+          }
+          continue;
+        }
         const effect = e.reconciliationAmount ?? e.amount;
         if (!effect) continue;
         lines.push(
@@ -1677,8 +1759,41 @@ async function runShiftAudit(
     const expenseEntries =
       [];
 
+    let structuredExpenseFeedUsed = false;
+    if (branchConfig.expenseMovementsUrl && branchConfig.expenseMovementsSecret) {
+      try {
+        const structuredMovements = await fetchStructuredMovementFeed(
+          branchConfig,
+          openingBoundaryTs,
+          closingBoundaryTs
+        );
+        const structuredEntries = buildStructuredExpenseEntries(
+          structuredMovements,
+          openingBoundaryTs,
+          closingBoundaryTs
+        );
+        expenseEntries.push(...structuredEntries);
+        expenseTotal = structuredEntries.reduce(
+          (sum, entry) => sum + (entry.reconciliationAmount || 0),
+          0
+        );
+        structuredExpenseFeedUsed = true;
+        console.info('Structured Expense App movement feed succeeded for shift audit', {
+          branch: branchConfig.name,
+          movementCount: structuredMovements.length,
+          afterUtc: new Date(Number(openingBoundaryTs) * 1000).toISOString(),
+          beforeUtc: new Date(Number(closingBoundaryTs) * 1000).toISOString()
+        });
+      } catch (error) {
+        console.warn('Structured Expense App movement feed unavailable for shift audit; using legacy Slack expense fallback.', {
+          message: error?.message || String(error)
+        });
+      }
+    }
+
     if (
-      expensesChannelId
+      expensesChannelId &&
+      !structuredExpenseFeedUsed
     ) {
       const expenseMessages =
         await history(
@@ -1847,7 +1962,7 @@ async function runShiftAudit(
     const adjustments =
       buildExpenseAdjustments(
         expenseEntries,
-        phpAdjustment
+        structuredExpenseFeedUsed ? cashMovementTotal : phpAdjustment
       );
 
     const results =
@@ -2715,6 +2830,8 @@ module.exports = {
   isScheduledClosing,
   previewPostTransactionBalance,
   structuredMovementEffect,
+  buildStructuredExpenseEntries,
+  buildStructuredExpenseAdjustments,
   manilaBusinessDateFromSlackTs,
   selectOpeningCashCountForPreview
 };
