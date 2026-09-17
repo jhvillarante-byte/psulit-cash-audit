@@ -847,28 +847,103 @@ function structuredMovementEffect(entry) {
   return legs;
 }
 
+function structuredHiveMovementEffects(movement) {
+  if (!movement || movement.status && movement.status !== 'Posted') return [];
+  const category = String(movement.category || '').trim();
+  const amount = Number(movement.actualAmount);
+  if (!Number.isFinite(amount) || amount <= 0) return [];
+  const actualCurrency = String(movement.actualCurrency || '').toUpperCase();
+  if (actualCurrency !== 'PHP') return [];
+  const effects = [];
+  const add = (signedAmount, direction) => {
+    if (Number.isFinite(signedAmount) && signedAmount !== 0) effects.push({ amount: signedAmount, direction });
+  };
+
+  if (category === 'Hive In') {
+    if (movement.fundDrawerUsed === 'Hive' && movement.assetType === 'Physical Cash') add(amount, 'IN');
+  } else if (category === 'Hive Out') {
+    if (movement.fundDrawerUsed === 'Hive' && movement.assetType === 'Physical Cash') add(-amount, 'OUT');
+  } else if (category === 'Internal Transfer' || category === 'Internal Fund Transfer' || category === 'Currency Exchange') {
+    if (movement.fundDrawerUsed === 'Hive' && movement.assetType === 'Physical Cash') add(-amount, 'OUT');
+    if (movement.destinationFund === 'Hive' && (movement.receivedAssetType || movement.assetType) === 'Physical Cash') {
+      add(Number(movement.receivedAmount ?? amount), 'IN');
+    }
+  }
+  return effects;
+}
+
 function buildStructuredHiveMovements(movements, oldestTs = -Infinity, latestTs = Infinity) {
-  const seen = new Set();
+  const seenIds = new Set();
+  const seenReferences = new Set();
   const out = [];
   for (const movement of Array.isArray(movements) ? movements : []) {
-    if (!movement || !['Hive In', 'Hive Out'].includes(movement.category)) continue;
-    if (movement.fundDrawerUsed !== 'Hive' || movement.assetType !== 'Physical Cash' || String(movement.actualCurrency || '').toUpperCase() !== 'PHP') continue;
     const id = String(movement.expenseId || movement.referenceId || '');
     const reference = String(movement.hiveTransactionReference || movement.hive_transaction_reference || movement.transferReference || id).trim().toUpperCase();
-    const duplicateKey = `${movement.category}|${reference}`;
-    if (!id || seen.has(id) || seen.has(duplicateKey)) continue;
+    if (!id || seenIds.has(id) || seenReferences.has(reference)) continue;
     const ts = structuredMovementTimestamp(movement);
     if (!ts || ts <= Number(oldestTs) || ts > Number(latestTs)) continue;
-    const amount = Number(movement.actualAmount);
-    if (!Number.isFinite(amount) || amount <= 0) continue;
-    seen.add(id); seen.add(duplicateKey);
-    out.push({
-      expenseId: id,
-      reference,
-      category: movement.category,
-      ts,
-      amount: movement.category === 'Hive In' ? amount : -amount
-    });
+    const effects = structuredHiveMovementEffects(movement);
+    if (!effects.length) continue;
+    seenIds.add(id); seenReferences.add(reference);
+    for (const effect of effects) {
+      out.push({
+        expenseId: id,
+        reference,
+        category: movement.category,
+        ts,
+        amount: effect.amount,
+        direction: effect.direction
+      });
+    }
+  }
+  return out.sort((a, b) => a.ts - b.ts || a.expenseId.localeCompare(b.expenseId));
+}
+
+function parseLegacyHiveInternalTransfer(text, ts) {
+  if (!/INTERNAL\s+FUND\s+TRANSFER/i.test(String(text || ''))) return null;
+  const recordId = String(text).match(/(?:^|\n)\s*\*?Record ID\s*:\s*\*?([^\n*]+)/i)?.[1]?.trim();
+  const amountMatch = String(text).match(/(?:^|\n)\s*\*?Amount Given\s*:\s*₱?\s*([\d,]+(?:\.\d+)?)\s*([A-Z]{3})/i);
+  const from = String(text).match(/(?:^|\n)\s*From\s*:\s*([^\n]+)/i)?.[1]?.trim() || '';
+  const to = String(text).match(/(?:^|\n)\s*To\s*:\s*([^\n]+)/i)?.[1]?.trim() || '';
+  const transferReference = String(text).match(/(?:^|\n)\s*Transfer Reference\s*:\s*([^\n]+)/i)?.[1]?.trim() || '';
+  if (!recordId || !amountMatch || !transferReference) return null;
+  if (String(amountMatch[2]).toUpperCase() !== 'PHP') return null;
+  const amount = Number(amountMatch[1].replace(/,/g, ''));
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  const fromHive = /\bhive\b/i.test(from);
+  const toHive = /\bhive\b/i.test(to);
+  if (fromHive === toHive) return null;
+  return {
+    expenseId: recordId,
+    reference: transferReference.trim().toUpperCase() || recordId,
+    category: 'Internal Transfer',
+    ts: Number(ts) || 0,
+    amount: toHive ? amount : -amount,
+    direction: toHive ? 'IN' : 'OUT',
+    legacy: true,
+    sourceFund: from,
+    destinationFund: to
+  };
+}
+
+function buildLegacyHiveMovements(messages, structuredMovements = [], oldestTs = -Infinity, latestTs = Infinity) {
+  const structuredKeys = new Set();
+  for (const movement of structuredMovements || []) {
+    if (movement.expenseId) structuredKeys.add(String(movement.expenseId).trim().toUpperCase());
+    if (movement.reference) structuredKeys.add(String(movement.reference).trim().toUpperCase());
+    if (movement.transferReference) structuredKeys.add(String(movement.transferReference).trim().toUpperCase());
+  }
+  const seen = new Set();
+  const out = [];
+  for (const message of Array.isArray(messages) ? messages : []) {
+    const ts = Number(message?.ts) || 0;
+    if (!ts || ts <= Number(oldestTs) || ts > Number(latestTs)) continue;
+    const movement = parseLegacyHiveInternalTransfer(message?.text || '', ts);
+    if (!movement) continue;
+    const keys = [movement.expenseId, movement.reference].map(value => String(value).trim().toUpperCase());
+    if (keys.some(key => structuredKeys.has(key) || seen.has(key))) continue;
+    keys.forEach(key => seen.add(key));
+    out.push(movement);
   }
   return out.sort((a, b) => a.ts - b.ts || a.expenseId.localeCompare(b.expenseId));
 }
@@ -1697,7 +1772,7 @@ function buildShiftMath({
       lines.push('⚠️ Structured Hive movement feed unavailable.');
     } else {
       lines.push(`Opening: ${moneyLabel('PHP', hiveAudit.previous)}`);
-      for (const movement of hiveAudit.movements || []) lines.push(`${movement.amount >= 0 ? '+' : '-'} ${movement.reference}: ${moneyLabel('PHP', Math.abs(movement.amount))}`);
+      for (const movement of hiveAudit.movements || []) lines.push(`${movement.amount >= 0 ? '+' : '-'} ${movement.reference}: ${moneyLabel('PHP', Math.abs(movement.amount))}${movement.legacy ? ' (legacy)' : ''}`);
       lines.push(`Expected: ${moneyLabel('PHP', hiveAudit.expected)}`);
       lines.push(`Actual: ${moneyLabel('PHP', hiveAudit.actual)}`);
       lines.push(`Difference: ${moneyLabel('PHP', hiveAudit.difference)} — ${hiveAudit.status}`);
@@ -1815,6 +1890,7 @@ async function runShiftAudit(
 
     let structuredExpenseFeedUsed = false;
     let structuredMovementsForHive = null;
+    let legacyHiveMovements = [];
     if (branchConfig.expenseMovementsUrl && branchConfig.expenseMovementsSecret) {
       try {
         const structuredMovements = await fetchStructuredMovementFeed(
@@ -1823,6 +1899,19 @@ async function runShiftAudit(
           closingBoundaryTs
         );
         structuredMovementsForHive = structuredMovements;
+        if (expensesChannelId) {
+          const legacyHiveMessages = await history(expensesChannelId, {
+            oldest: openingBoundaryTs,
+            latest: closingBoundaryTs,
+            limit: 300
+          });
+          legacyHiveMovements = buildLegacyHiveMovements(
+            legacyHiveMessages,
+            structuredMovements,
+            openingBoundaryTs,
+            closingBoundaryTs
+          );
+        }
         const structuredEntries = buildStructuredExpenseEntries(
           structuredMovements,
           openingBoundaryTs,
@@ -2060,10 +2149,15 @@ async function runShiftAudit(
     const hiveClosingCorrection = resolutionCorrections.find(
       correction => correction.currency === 'Hive' && correction.cashCountRef === closingCount?.refCode
     );
+    const structuredHiveMovements = buildStructuredHiveMovements(
+      structuredMovementsForHive || [],
+      openingBoundaryTs,
+      closingBoundaryTs
+    );
     const hiveAudit = reconcileHiveCash({
       previous: openingCount?.others?.Hive,
       actual: hiveClosingCorrection ? hiveClosingCorrection.correctedValue : closingCount?.others?.Hive,
-      movements: buildStructuredHiveMovements(structuredMovementsForHive || [], openingBoundaryTs, closingBoundaryTs),
+      movements: [...structuredHiveMovements, ...legacyHiveMovements].sort((a, b) => a.ts - b.ts || a.expenseId.localeCompare(b.expenseId)),
       feedAvailable: structuredExpenseFeedUsed
     });
 
@@ -2914,6 +3008,8 @@ module.exports = {
   buildStructuredExpenseEntries,
   buildStructuredExpenseAdjustments,
   buildStructuredHiveMovements,
+  parseLegacyHiveInternalTransfer,
+  buildLegacyHiveMovements,
   reconcileHiveCash,
   manilaBusinessDateFromSlackTs,
   selectOpeningCashCountForPreview
