@@ -427,6 +427,7 @@ function registerTestRoutes(app, BRANCHES) {
         const notice = `${marker}\nOwner-authorized time-check exception due to Cash Count app access errors. ` +
           `Window: confirmed 10:00 AM opening through the 8:54 PM closing post. ` +
           `Amounts unchanged from manual source counts.\n` +
+          `Parsing review: AR 0005846 says 1.000 EUR; the parser reads EUR 1, while PHP 70,830 / 70.83 implies EUR 1,000. Any EUR 999 difference requires checking this notation, not treating it as a confirmed cash overage.\n` +
           `Opening source: https://orbitph.slack.com/archives/${channel}/p${openingTs.replace('.', '')}\n` +
           `Closing source: https://orbitph.slack.com/archives/${channel}/p${closingTs.replace('.', '')}\n` +
           `Copied reference codes are duplicated; counts identified by Slack message.\n\n`;
