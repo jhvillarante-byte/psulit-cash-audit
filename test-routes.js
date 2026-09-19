@@ -385,6 +385,59 @@ function registerTestRoutes(app, BRANCHES) {
         );
       }
 
+      // Date-scoped owner exception for manually posted counts during app outage.
+      if (req.query.exception === 'alphaland-20260919') {
+        const channel = branchConfig.cashCountChannelId;
+        if (branchConfig.name !== 'Alphaland' || channel !== 'C06NDDD1D0U') {
+          return res.status(400).send('Exception applies only to Alphaland.');
+        }
+        const marker = 'Manual audit exception: ALP-20260919';
+        const openingTs = '1789791693.485489';
+        const closingTs = '1789822481.529339';
+        const recent = await history(channel, { oldest: closingTs, limit: 200 });
+        const existing = recent.find(m => m.bot_id && (m.text || '').includes(marker));
+        if (existing) return res.send(`Already posted. Slack message ts: ${existing.ts}`);
+        async function exactCount(ts, phase) {
+          const messages = await history(channel, { oldest: ts, latest: ts, limit: 10 });
+          const message = messages.find(m => m.ts === ts);
+          const count = message && parseCashCount(message.text || '');
+          if (!count || count.branch !== 'Alphaland' ||
+              (count.phase || '').toLowerCase() !== phase ||
+              !String(count.timestamp).startsWith('09/19/2026')) {
+            throw new Error(`Exact ${phase} source count missing or changed.`);
+          }
+          // Copied refCode is shared with yesterday: use source message identity
+          // to avoid applying another count's formal resolution overlays.
+          return { ...count, refCode: `SLACK-${ts}`, _ts: ts };
+        }
+        const opening = await exactCount(openingTs, 'opening');
+        const closing = await exactCount(closingTs, 'closing');
+        const report = await runShiftAudit(
+          { ts: closingTs },
+          { ...closing, timestamp: '09/19/2026, 20:54:41' },
+          branchConfig,
+          { dryRun: true, openingCountOverride: {
+            ...opening, timestamp: '09/19/2026, 10:00:00',
+            _ts: String(Date.parse('2026-09-19T10:00:00+08:00') / 1000)
+          } }
+        );
+        if (!report || /Audit bot error|No opening count found/.test(report)) {
+          return res.status(500).send(report || 'Audit did not produce a report.');
+        }
+        const notice = `${marker}\nOwner-authorized time-check exception due to Cash Count app access errors. ` +
+          `Window: confirmed 10:00 AM opening through the 8:54 PM closing post. ` +
+          `Amounts unchanged from manual source counts.\n` +
+          `Opening source: https://orbitph.slack.com/archives/${channel}/p${openingTs.replace('.', '')}\n` +
+          `Closing source: https://orbitph.slack.com/archives/${channel}/p${closingTs.replace('.', '')}\n` +
+          `Copied reference codes are duplicated; counts identified by Slack message.\n\n`;
+        if (req.query.dry === '1') return res.type('text/plain').send(notice + report);
+        const parts = report.replace('_[DRY RUN — not posted to Slack]_\n', '').split('\n\n_[THREAD PREVIEW]_\n');
+        const posted = await postMessage(channel, notice + parts[0]);
+        if (!posted || !posted.ts) throw new Error('Slack did not confirm delivery.');
+        if (parts[1]) await require('./slack').replyInThread(channel, posted.ts, parts[1]);
+        return res.send(`Posted September 19 manual audit for Alphaland. Slack message ts: ${posted.ts}`);
+      }
+
       const found = await findMostRecent(
         branchConfig.cashCountChannelId,
         branchConfig.name,
