@@ -391,7 +391,8 @@ function registerTestRoutes(app, BRANCHES) {
         if (branchConfig.name !== 'Alphaland' || channel !== 'C06NDDD1D0U') {
           return res.status(400).send('Exception applies only to Alphaland.');
         }
-        const marker = 'Manual audit exception: ALP-20260919';
+        const revised = req.query.revision === '2';
+        const marker = revised ? 'Revised audit: ALP-20260919-v2' : 'Manual audit exception: ALP-20260919';
         const openingTs = '1789791693.485489';
         const closingTs = '1789822481.529339';
         const recent = await history(channel, { oldest: closingTs, limit: 200 });
@@ -412,6 +413,65 @@ function registerTestRoutes(app, BRANCHES) {
         }
         const opening = await exactCount(openingTs, 'opening');
         const closing = await exactCount(closingTs, 'closing');
+        if (revised) {
+          const oldest = String(Date.parse('2026-09-19T10:00:00+08:00') / 1000);
+          const messages = await history(branchConfig.transactionsChannelId, { oldest, latest: closingTs, limit: 200 });
+          const tickets = messages.filter(m => TICKET_RE.test(m.text || '')).map(m => parseTransaction(m.text || ''));
+          if (tickets.length !== 5 || tickets.some(t => !t)) throw new Error('Forex source set changed; review before reposting.');
+          const euro = tickets.find(t => String(t.ref).replace(/^0+/, '') === '5846');
+          const euroMovement = euro?.movements?.find(m => m.ccy === 'EUR');
+          if (!euroMovement || euroMovement.action !== 'BUY' || euroMovement.rate !== 70.83 || euro.phpAmount !== 70830 || ![1, 1000].includes(euroMovement.fcyAmount)) {
+            throw new Error('EUR typo evidence changed; review required.');
+          }
+          // Owner confirmed this notation correction in the audit request.
+          euroMovement.fcyAmount = 1000;
+          const forex = reconcile(opening.totals, closing.totals, tickets);
+          if (forex.some(r => !r.match)) throw new Error('Additional forex difference found; review required.');
+          const logs = await history('C06NDK0GLKW', { oldest, latest: closingTs, limit: 200 });
+          const hiveLog = logs.find(m => m.ts === '1789804228.460269');
+          const scratchLog = logs.find(m => m.ts === '1789797032.555719');
+          if (!/HIVE OUT/.test(hiveLog?.text || '') || !/50,000[.]00/.test(hiveLog.text) ||
+              !/15,480[.]00 PHP received into Scratch/.test(scratchLog?.text || '')) {
+            throw new Error('Cash-log evidence changed; review required.');
+          }
+          const hiveExpected = opening.others.Hive - 50000;
+          const hiveActual = closing.others.Hive;
+          // Reviewed Supabase snapshot for this one-off report: only posted
+          // sale SCR-20260919-005, 52 x PHP20, posted 21:06 Manila. All payouts
+          // in the reviewed September 19 snapshot are voided and excluded.
+          const scratchExpected = opening.others.Scratch + 15480 + 1040;
+          const scratchActual = closing.others.Scratch;
+          if (![hiveExpected, hiveActual, scratchExpected, scratchActual].every(Number.isFinite)) throw new Error('Missing fund balances.');
+          const differences = [
+            { currency: 'Hive', expected: hiveExpected, actual: hiveActual },
+            { currency: 'Scratch', expected: scratchExpected, actual: scratchActual }
+          ].filter(r => Math.abs(r.actual - r.expected) > 0.01).map(r => ({
+            channel, branch: 'Alphaland', openingRef: opening.refCode, closingRef: closing.refCode,
+            currency: r.currency, amount: Math.abs(r.actual - r.expected),
+            direction: r.actual < r.expected ? 'SHORT' : 'EXTRA'
+          }));
+          const revisedReport = [
+            `🔍 *REVISED CASH AUDIT — ALPHALAND | September 19, 2026*`, marker,
+            'Supersedes the earlier manual report. Owner-authorized time exception due to Cash Count app access errors.',
+            '', '✅ *Forex reconciled — 5 transactions checked.*',
+            'EUR: AR 0005846 “1.000” confirmed by owner as a typo for 1,000 EUR. Opening €145 + €1,000 = closing €1,145. No EUR discrepancy.',
+            '', `${Math.abs(hiveActual - hiveExpected) <= 0.01 ? '✅' : '⚠️'} *Hive*: ₱${fmt(opening.others.Hive)} − ₱50,000.00 (ALP-20260919-002) = ₱${fmt(hiveExpected)} expected; closing ₱${fmt(hiveActual)}.`,
+            '', `⚠️ *Scratch cash — unresolved difference ₱${fmt(Math.abs(scratchActual - scratchExpected))}*`,
+            `Opening ₱${fmt(opening.others.Scratch)} + Secuna payment ₱15,480.00 (ALP-20260919-001) + sales ₱1,040.00 − posted prizes ₱0.00 = expected ₱${fmt(scratchExpected)}.`,
+            `Actual closing: ₱${fmt(scratchActual)}. Please explain and provide supporting records before resolving. This is not yet a confirmed cash shortage.`,
+            'Sales: SCR-20260919-005, 52 cards × ₱20, posted at 9:06 PM after the closing report; included in this daily reconciliation. Voided entries excluded.',
+            '✅ Scratch inventory: 187 opening − 52 sold = 135 closing cards.',
+            '', 'Scratch sales/prizes use the reviewed September 19 database snapshot; source cash counts remain unchanged. Other funds are outside this revised audit.',
+            `<https://orbitph.slack.com/archives/${channel}/p${openingTs.replace('.', '')}|Opening count> · <https://orbitph.slack.com/archives/${channel}/p${closingTs.replace('.', '')}|Closing count>`,
+            'Use *Resolve Discrepancy* below after the Scratch difference has been verified.'
+          ].join('\n');
+          const blocks = require('./discrepancy-resolutions').reportBlocks(revisedReport, differences);
+          if (req.query.dry === '1') return res.json({ report: revisedReport, discrepancies: differences, blocks });
+          const posted = await postMessage(channel, revisedReport, { blocks });
+          if (!posted?.ts) throw new Error('Slack did not confirm delivery.');
+          return res.send(`Posted revised audit with resolution controls. Slack message ts: ${posted.ts}`);
+        }
+
         const report = await runShiftAudit(
           { ts: closingTs },
           { ...closing, timestamp: '09/19/2026, 20:54:41' },
