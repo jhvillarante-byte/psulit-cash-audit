@@ -12,6 +12,7 @@
 
 const { APPROVED_CORRECTIONS, applyApprovedOpeningCorrections, applyApprovedTransactionCorrections } = require('./corrections');
 const { reconcile, transactionPhpEffect } = require('./reconcile');
+const { readScratchTransactions, reconcileScratch, scratchSummary } = require('./scratch-audit');
 const { correctionFromResolution, reportBlocks } = require('./discrepancy-resolutions');
 
 const {
@@ -1483,8 +1484,8 @@ function buildShiftSummary({
     );
 
     lines.push(hiveAudit?.status === 'MATCH'
-      ? 'ℹ️ Scratch, JuanPay, Opex, and other funds are not yet fully reconciled.'
-      : 'ℹ️ Scratch, JuanPay, Hive, Opex, and other funds are not yet fully reconciled.');
+      ? 'ℹ️ JuanPay, Opex, and other funds are not yet fully reconciled. Scratch cash is reported separately.'
+      : 'ℹ️ JuanPay, Hive, Opex, and other funds are not yet fully reconciled. Scratch cash is reported separately.');
 
     return lines.join(
       '\n'
@@ -2169,6 +2170,32 @@ async function runShiftAudit(
       feedAvailable: structuredExpenseFeedUsed
     });
 
+    let scratchAudit;
+    try {
+      const scratchMovements = [];
+      if (!structuredExpenseFeedUsed) throw new Error('Cash movement feed unavailable');
+      for (const movement of structuredMovementsForHive || []) {
+        const ts = structuredMovementTimestamp(movement);
+        if (ts <= openingBoundaryTs || ts > closingBoundaryTs) continue;
+        const mapped = { ...movement,
+          fundDrawerUsed: movement.fundDrawerUsed === 'Scratch' ? 'Forex Drawer' : '__other__',
+          destinationFund: (movement.destinationFund || movement.fundDrawerUsed) === 'Scratch' ? 'Forex Drawer' : '__other__'
+        };
+        const legs = structuredMovementEffect(mapped);
+        if (legs.some(leg => leg.ccy !== 'PHP')) throw new Error('Non-PHP Scratch movement requires review');
+        if (legs.length) scratchMovements.push({ reference: movement.expenseId || movement.referenceId, amount: legs.reduce((sum, leg) => sum + leg.amount, 0) });
+      }
+      const transactions = await readScratchTransactions(branchConfig.name, openingBoundaryTs, closingBoundaryTs);
+      const closingCorrection = resolutionCorrections.find(c => c.currency === 'Scratch' && c.cashCountRef === closingCount.refCode);
+      const openingCorrection = resolutionCorrections.find(c => c.currency === 'Scratch' && c.cashCountRef === openingCount.refCode);
+      scratchAudit = reconcileScratch({
+        opening: openingCorrection ? openingCorrection.correctedValue : openingCount?.others?.Scratch,
+        closing: closingCorrection ? closingCorrection.correctedValue : closingCount?.others?.Scratch,
+        transactions, movements: scratchMovements, branch: branchConfig.name,
+        oldest: openingBoundaryTs, latest: closingBoundaryTs
+      });
+    } catch (_) { scratchAudit = { status: 'UNAVAILABLE', reason: 'Scratch ledger or cash movement feed unavailable; configuration and records require review' }; }
+
     const dateLabel =
       (
         closingCount.timestamp ||
@@ -2193,7 +2220,7 @@ async function runShiftAudit(
         dryRun
       );
 
-    const report =
+    let report =
       buildShiftSummary({
         branchConfig,
         openingCount,
@@ -2210,6 +2237,8 @@ async function runShiftAudit(
         dryRun,
         hiveAudit
       });
+
+    report += `\n\n${scratchSummary(scratchAudit)}`;
 
     const math =
       buildShiftMath({
@@ -2250,6 +2279,13 @@ async function runShiftAudit(
         direction: hiveAudit.difference < 0 ? 'SHORT' : 'EXTRA'
       });
     }
+
+    if (scratchAudit.status === 'DISCREPANCY') resolutionDiscrepancies.push({
+      channel: cashCountChannelId, branch: branchConfig.name,
+      openingRef: openingCount.refCode, closingRef: closingCount.refCode,
+      currency: 'Scratch', amount: Math.abs(scratchAudit.difference),
+      direction: scratchAudit.difference < 0 ? 'SHORT' : 'EXTRA'
+    });
 
     const posted =
       await postMessage(

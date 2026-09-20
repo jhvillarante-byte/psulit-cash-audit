@@ -36,14 +36,14 @@ Create server-only random `AUDIT_JOB_SECRET` and `AUDIT_ADMIN_SECRET` in Netlify
 
 ## Known limits carried forward
 
-The regular audit engine still excludes Scratch cash from its general forex reconciliation. September 19 Alphaland's Scratch review is a date-scoped, explicitly reviewed snapshot in the existing manual exception, not a new general Scratch automation. Migrating hosting alone does not change that behavior. Malformed manually copied count timestamps still need an explicitly approved, source-specific audit run.
+Shift audits now include a separate Scratch cash reconciliation from the same Supabase transaction ledger used by PSulit Scratch Bot, plus structured cash movements. Configure `SCRATCH_DATABASE_URL` with a TLS database connection and a read-only role allowed to SELECT public.scratch_transactions. This reads the database directly and never calls the Scratch Render service. Missing feeds or counts, ambiguous replenishments, unsupported transaction types, and inconsistent sales remain UNAVAILABLE rather than cleared. Scratch discrepancies use the existing Slack Resolve Discrepancy workflow. Cash logs must identify Scratch using the exact fund name `Scratch`.
+
+The confirmed Telegram evidence group is PSulit - Scratch It Transactions (historical chat ID -5376772680). This integration reads its underlying application transactions; it does not claim to read Telegram history or capture manual Telegram-only entries. Physical ticket inventory reconciliation remains unimplemented. Historical date-scoped exceptions still use their reviewed snapshots. Malformed manually copied timestamps still require source-specific handling.
 
 ## Current validation
 
 Original audit regression suite and TypeScript check pass. Migration checks cover Slack signatures, replay rejection, URL challenges, disabled readiness, protected audit endpoints, and reusable server import without a listening socket. Live delivery and cutover require deployment authentication plus the original Cash Audit bot configuration.
 
-## Required extension: Scratch auditing with Telegram
+## Remaining verification
 
-The user requires ongoing Scratch auditing as part of the completed migration. This is not implemented by the existing September 19 snapshot. Confirm the Telegram group/topic and whether it contains transaction evidence, should receive audit reports, or both before wiring its integration. Existing Telegram support sends reports and balance notifications; it does not ingest Scratch Telegram records.
-
-Reconcile Scratch cash separately: opening cash + active sales + cash transfers/receivable collections in - active payouts - transfers out = expected closing cash. Reconcile physical inventory separately by game/denomination: opening stock + received stock - sold cards - returned/transferred stock = expected closing stock. Exclude voided records, avoid counting the same transaction in Telegram and the application twice, distinguish missing evidence from a matched balance, and disclose late entries and the audit cutoff. Use real branch mappings, source references, and durable delivery/event deduplication. Preserve the Cash Audit backend → PSulit Cash Audit bot → correct branch Slack channel and Resolve Discrepancy workflow. Telegram destination and interaction requirements need confirmation.
+Securely provision the read-only Scratch database connection and original Cash Audit credentials, deploy, and compare one real branch window against the Scratch application and cash logs. Confirm Telegram-only manual entries if any. Physical inventory reconciliation needs independent opening/closing stock evidence. Do not mark migration complete until live report delivery and resolution controls have been verified and the Cash Audit Render service and its callers have been retired.
