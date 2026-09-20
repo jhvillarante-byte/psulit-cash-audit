@@ -444,6 +444,11 @@ app.post(
       .status(200)
       .send();
 
+    processSlackEvent(body).catch(err => console.error('Slack event failed:', err.message));
+  }
+);
+
+async function processSlackEvent(body) {
     const event =
       body.event;
 
@@ -496,7 +501,7 @@ app.post(
     if (transactionBranch) {
       // Slack has already received the event and the HTTP 200 was sent above.
       // Balance calculation/Telegram delivery is deliberately fire-and-forget.
-      notifyTransactionBalance(event, transactionBranch).catch(err =>
+      await notifyTransactionBalance(event, transactionBranch).catch(err =>
         console.error('Running balance notification task failed:', err.message)
       );
       return;
@@ -556,8 +561,7 @@ app.post(
         err
       );
     }
-  }
-);
+}
 
 async function handleCashCount(
   event,
@@ -2401,7 +2405,7 @@ const PORT =
 
 const BALANCE_NOTIFICATIONS = new BalanceNotificationTracker();
 
-app.listen(
+if (require.main === module) app.listen(
   PORT,
   () =>
     console.log(
@@ -2409,30 +2413,4 @@ app.listen(
     )
 );
 
-const SELF_URL =
-  process.env
-    .RENDER_EXTERNAL_URL;
-
-if (
-  SELF_URL
-) {
-  setInterval(
-    () => {
-      axios
-        .get(
-          SELF_URL
-        )
-        .catch(
-          err =>
-            console.error(
-              'Keep-alive ping failed:',
-              err.message
-            )
-        );
-    },
-
-    10 *
-      60 *
-      1000
-  );
-}
+module.exports = { app, processSlackEvent, discrepancyResolutionWorkflow, runHiveDiagnostic, BRANCHES };

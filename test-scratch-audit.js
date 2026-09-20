@@ -1,0 +1,16 @@
+const assert = require('node:assert/strict');
+const { reconcileScratch, scratchSummary } = require('./scratch-audit');
+const sale = { scratch_id: 'SCR-1', branch: 'Alphaland', transaction_type: 'SALE', official_timestamp: '2026-09-20T03:00:00Z', status: 'Posted', total_value: '100', cash_received: '100' };
+const payout = { ...sale, scratch_id: 'SCR-2', transaction_type: 'PAYOUT', total_value: '20', cash_received: null };
+const input = { opening: 1000, closing: 1130, branch: 'Alphaland', oldest: Date.parse('2026-09-20T02:00:00Z') / 1000, latest: Date.parse('2026-09-20T13:00:00Z') / 1000, transactions: [sale, sale, payout, { ...sale, scratch_id: 'void', status: 'Voided' }], movements: [{ reference: 'ALP-1', amount: 50 }] };
+assert.equal(reconcileScratch(input).status, 'MATCH');
+assert.equal(reconcileScratch({ ...input, closing: 1120 }).difference, -10);
+assert.equal(reconcileScratch({ ...input, opening: null }).status, 'UNAVAILABLE');
+assert.equal(reconcileScratch({ ...input, movements: null }).status, 'UNAVAILABLE');
+assert.equal(reconcileScratch({ ...input, transactions: [{ ...sale, branch: 'Solaire' }] }).status, 'UNAVAILABLE');
+assert.equal(reconcileScratch({ ...input, transactions: [sale, { ...sale, cash_received: 120 }] }).status, 'UNAVAILABLE');
+assert.equal(reconcileScratch({ ...input, transactions: [{ ...sale, transaction_type: 'REPLENISHMENT' }] }).status, 'UNAVAILABLE');
+assert.equal(reconcileScratch({ ...input, transactions: [{ ...sale, official_timestamp: '2026-09-20T14:00:00Z' }], closing: 1050 }).status, 'MATCH');
+assert.equal(reconcileScratch({ ...input, movements: [{ reference: 'SCR-1', amount: 100 }] }).status, 'UNAVAILABLE');
+assert.match(scratchSummary(reconcileScratch(input)), /Physical ticket inventory is not verified/);
+console.log('PASS Scratch cash: sales, payouts, voids, duplicates, transfers, boundaries, unavailable evidence.');
