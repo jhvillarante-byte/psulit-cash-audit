@@ -5,12 +5,21 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test-receivable-expense.js && node test-structured-shift-audit.js && node test-alphaland-sept9.js && node test-corrections.js && node test-transaction-corrections.js && node test-transaction-parser-running-balance.js && node test-admin-actions.js && node test-discrepancy-resolutions.js && node test-resolution-overlays.js && node test-slack-boundaries.js && node test-report-behavior.js && node test-lottomatik-summary.js && node test-balance-preview-opening.js && node test-balance-telegram.js && node test-hive-diagnostic.js"
+    "test": "node test-receivable-expense.js && node test-structured-shift-audit.js && node test-alphaland-sept9.js && node test-corrections.js && node test-transaction-corrections.js && node test-transaction-parser-running-balance.js && node test-admin-actions.js && node test-discrepancy-resolutions.js && node test-resolution-overlays.js && node test-slack-boundaries.js && node test-report-behavior.js && node test-lottomatik-summary.js && node test-balance-preview-opening.js && node test-balance-telegram.js && node test-hive-diagnostic.js",
+    "check": "tsc --noEmit",
+    "test:migration": "node --experimental-strip-types test-netlify-migration.mjs"
   },
   "dependencies": {
+    "@netlify/blobs": "11.1.0",
+    "@netlify/functions": "6.0.0",
     "axios": "^1.7.2",
     "exceljs": "^4.4.0",
     "express": "^4.19.2",
-    "pg": "^8.16.3"
+    "pg": "^8.16.3",
+    "serverless-http": "4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.2",
+    "typescript": "7.0.2"
   }
 }

@@ -444,6 +444,11 @@ app.post(
       .status(200)
       .send();
 
+    processSlackEvent(body).catch(err => console.error('Slack event failed:', err.message));
+  }
+);
+
+async function processSlackEvent(body) {
     const event =
       body.event;
 
@@ -496,7 +501,7 @@ app.post(
     if (transactionBranch) {
       // Slack has already received the event and the HTTP 200 was sent above.
       // Balance calculation/Telegram delivery is deliberately fire-and-forget.
-      notifyTransactionBalance(event, transactionBranch).catch(err =>
+      await notifyTransactionBalance(event, transactionBranch).catch(err =>
         console.error('Running balance notification task failed:', err.message)
       );
       return;
@@ -556,8 +561,7 @@ app.post(
         err
       );
     }
-  }
-);
+}
 
 async function handleCashCount(
   event,
@@ -2401,7 +2405,7 @@ const PORT =
 
 const BALANCE_NOTIFICATIONS = new BalanceNotificationTracker();
 
-app.listen(
+if (require.main === module) app.listen(
   PORT,
   () =>
     console.log(
@@ -2414,7 +2418,7 @@ const SELF_URL =
     .RENDER_EXTERNAL_URL;
 
 if (
-  SELF_URL
+  require.main === module && SELF_URL
 ) {
   setInterval(
     () => {
@@ -2436,3 +2440,5 @@ if (
       1000
   );
 }
+
+module.exports = { app, processSlackEvent, discrepancyResolutionWorkflow, runHiveDiagnostic, BRANCHES };
