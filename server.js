@@ -2413,32 +2413,4 @@ if (require.main === module) app.listen(
     )
 );
 
-const SELF_URL =
-  process.env
-    .RENDER_EXTERNAL_URL;
-
-if (
-  require.main === module && SELF_URL
-) {
-  setInterval(
-    () => {
-      axios
-        .get(
-          SELF_URL
-        )
-        .catch(
-          err =>
-            console.error(
-              'Keep-alive ping failed:',
-              err.message
-            )
-        );
-    },
-
-    10 *
-      60 *
-      1000
-  );
-}
-
 module.exports = { app, processSlackEvent, discrepancyResolutionWorkflow, runHiveDiagnostic, BRANCHES };

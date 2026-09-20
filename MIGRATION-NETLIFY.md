@@ -32,7 +32,7 @@ Create server-only random `AUDIT_JOB_SECRET` and `AUDIT_ADMIN_SECRET` in Netlify
 5. Set `AUDIT_ENABLED=true` and deploy the new environment.
 6. Change the existing Slack app Event Subscriptions URL to `https://psulit-cash-audit.netlify.app/slack/events` and Interactivity URL to `https://psulit-cash-audit.netlify.app/slack/interactions`. Preserve existing scopes, subscriptions, and manager IDs. Update the optional Hive diagnostic command and Transaction Entry balance-preview URL if configured.
 7. Post a user-authorized audit and verify the bot identity, branch, report, computation thread, and resolution button. Do not submit a fake financial resolution for testing.
-8. Retain the suspended Render service/config until successful verification; no Render reactivation is required.
+8. After successful verification and secure transfer of required configuration, remove the Cash Audit service from Render. Remove its keep-alive monitors and update every caller, webhook, scheduled trigger, and feed URL that points to that service. The completed migration must have no Cash Audit runtime dependency on Render. Do not delete unrelated services.
 
 ## Known limits carried forward
 
@@ -41,3 +41,9 @@ The regular audit engine still excludes Scratch cash from its general forex reco
 ## Current validation
 
 Original audit regression suite and TypeScript check pass. Migration checks cover Slack signatures, replay rejection, URL challenges, disabled readiness, protected audit endpoints, and reusable server import without a listening socket. Live delivery and cutover require deployment authentication plus the original Cash Audit bot configuration.
+
+## Required extension: Scratch auditing with Telegram
+
+The user requires ongoing Scratch auditing as part of the completed migration. This is not implemented by the existing September 19 snapshot. Confirm the Telegram group/topic and whether it contains transaction evidence, should receive audit reports, or both before wiring its integration. Existing Telegram support sends reports and balance notifications; it does not ingest Scratch Telegram records.
+
+Reconcile Scratch cash separately: opening cash + active sales + cash transfers/receivable collections in - active payouts - transfers out = expected closing cash. Reconcile physical inventory separately by game/denomination: opening stock + received stock - sold cards - returned/transferred stock = expected closing stock. Exclude voided records, avoid counting the same transaction in Telegram and the application twice, distinguish missing evidence from a matched balance, and disclose late entries and the audit cutoff. Use real branch mappings, source references, and durable delivery/event deduplication. Preserve the Cash Audit backend → PSulit Cash Audit bot → correct branch Slack channel and Resolve Discrepancy workflow. Telegram destination and interaction requirements need confirmation.
