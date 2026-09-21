@@ -36,13 +36,17 @@ Create server-only random `AUDIT_JOB_SECRET` and `AUDIT_ADMIN_SECRET` in Netlify
 
 ## Known limits carried forward
 
-Shift audits now include a separate Scratch cash reconciliation from the same Supabase transaction ledger used by PSulit Scratch Bot, plus structured cash movements. Configure `SCRATCH_DATABASE_URL` with a TLS database connection and a read-only role allowed to SELECT public.scratch_transactions. This reads the database directly and never calls the Scratch Render service. Missing feeds or counts, ambiguous replenishments, unsupported transaction types, and inconsistent sales remain UNAVAILABLE rather than cleared. Scratch discrepancies use the existing Slack Resolve Discrepancy workflow. Cash logs must identify Scratch using the exact fund name `Scratch`.
+Shift audits include a separate Scratch cash reconciliation using allocated tickets, transaction items, payout claims and structured cash movements. Configure `SCRATCH_DATABASE_URL` with a TLS database connection and a read-only role allowed to SELECT `public.scratch_transactions`, `scratch_tickets`, `scratch_transaction_items`, `scratch_payout_claims`, and `scratch_telegram_deliveries`. Prefer the Supabase transaction pooler for the serverless deployment; queries are unnamed and the client pool is capped at one connection. This never calls the Scratch Render service.
+
+Sales without allocated tickets are excluded from the provisional cash calculation and listed for review, not automatically declared tests. Incomplete allocations, invalid amounts and unsupported payouts remain UNAVAILABLE. If any sales are excluded, status is REVIEW even if the provisional difference is zero; no confirmed Scratch shortage or clearance is emitted. Payouts must match a unique sold-ticket claim. Voided and superseded Corrected transactions are excluded. Ordinary fully supported Scratch discrepancies retain the existing Slack Resolve Discrepancy workflow. Cash logs must identify Scratch using the exact fund name `Scratch`.
+
+The report includes opening + ticket-supported sales − claimed payouts + net cash movements = expected, followed by actual − expected = difference. Telegram delivery receipts are checked separately: missing delivery evidence does not remove a ticket-supported cash transaction. Database delivery receipts do not prove that a message still exists in Telegram or that manual Telegram-only posts are complete.
 
 The confirmed Telegram evidence group is PSulit - Scratch It Transactions (historical chat ID -5376772680). This integration reads its underlying application transactions; it does not claim to read Telegram history or capture manual Telegram-only entries. Physical ticket inventory reconciliation remains unimplemented. Historical date-scoped exceptions still use their reviewed snapshots. Malformed manually copied timestamps still require source-specific handling.
 
 ## Current validation
 
-Original audit regression suite and TypeScript check pass. Migration checks cover Slack signatures, replay rejection, URL challenges, disabled readiness, protected audit endpoints, and reusable server import without a listening socket. Live delivery and cutover require deployment authentication plus the original Cash Audit bot configuration.
+Original audit regression suite and TypeScript check pass. Scratch regression cases cover seven unallocated ₱60 test-like postings, missing/partial ticket allocations, duplicate payout claims, and missing Telegram delivery receipts. The expanded SQL reader still requires live schema/permission verification with the read-only database connection. Migration checks cover Slack signatures, replay rejection, URL challenges, disabled readiness, protected audit endpoints, and reusable server import without a listening socket. Live delivery and cutover require deployment authentication plus the original Cash Audit bot configuration.
 
 ## Remaining verification
 
