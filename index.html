@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>PSulit Audit Report</title>
+<style>
+:root{--g:#0f5c43;--g2:#eaf6f0;--line:#d7e3dd;--txt:#17211d;--muted:#66736d;--gold:#b78300;--red:#c7362f;--bg:#f4f7f5}
+*{box-sizing:border-box}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;background:var(--bg);color:var(--txt)}
+.wrap{max-width:680px;margin:0 auto;padding:16px 14px 40px}.top{background:linear-gradient(135deg,#0d533d,#0a6a49);color:#fff;padding:20px;border-radius:20px;box-shadow:0 10px 28px rgba(12,84,61,.18)}
+.top h1{margin:0;font-size:30px;line-height:1.05}.top p{margin:6px 0 0;opacity:.88;font-size:14px}.card{background:#fff;border-radius:18px;padding:16px;margin-top:14px;box-shadow:0 7px 22px rgba(27,54,43,.08)}
+label{display:block;font-size:13px;font-weight:700;margin-bottom:7px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}select,input{width:100%;border:1px solid #cad7d1;background:#fff;border-radius:12px;padding:13px 12px;font-size:16px;outline:none}.actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}.btn{border:0;border-radius:13px;padding:14px 12px;font-size:15px;font-weight:800;cursor:pointer}.primary{background:var(--g);color:#fff}.secondary{background:#e9f1ed;color:var(--g)}.telegram{background:#2aabee;color:#fff;width:100%;margin-top:10px}.disabled{opacity:.45;pointer-events:none}.status{margin-top:12px;font-size:13px;color:var(--muted);min-height:18px}.preview{margin-top:14px}.preview h2{font-size:18px;margin:0 0 10px}.image-shell{background:#1c1f1d;padding:10px;border-radius:18px;overflow:auto}.report{width:100%;background:#fff;border-radius:12px;overflow:hidden;border:1px solid #dfe8e4}.rhead{background:#0e5c43;color:#fff;padding:16px 17px}.rhead .title{font-size:25px;font-weight:900;letter-spacing:.2px}.rhead .sub{font-size:13px;margin-top:3px;opacity:.92}.banner{padding:9px 14px;background:#e8f6ef;color:#0f5c43;font-weight:900;font-size:14px;border-bottom:1px solid #d3e7dd}.sec{border-bottom:1px solid #dde6e2}.sec-title{background:#f0f5f2;color:#0f5c43;font-size:16px;font-weight:900;padding:9px 13px}.sec-title.gold{background:#fff7dc;color:#8a6500}.row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;padding:8px 13px;border-top:1px solid #edf1ef;font-size:14px;align-items:start}.row:first-of-type{border-top:0}.row .v{text-align:right;font-weight:650}.row strong{font-weight:900}.good{color:#138742}.warn{color:#bd8100}.bad{color:var(--red)}.total{background:#f1faf5}.foot{padding:11px 13px;background:#f6faf8;font-size:11px;line-height:1.35;color:#46524d}.hidden{display:none}@media(max-width:420px){.wrap{padding:10px 9px 30px}.top{padding:17px}.top h1{font-size:27px}.grid,.actions{grid-template-columns:1fr}.report .row{font-size:13px}.rhead .title{font-size:22px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top"><h1>PSulit Audit Report</h1><p>Generate, preview as image-style report, then send to Telegram.</p></div>
+  <div class="card">
+    <div class="grid">
+      <div><label>Branch</label><select id="branch"><option>Alphaland</option><option>Solaire</option></select></div>
+      <div><label>Audit Date</label><input id="date" type="date" value="2026-09-30" /></div>
+    </div>
+    <div class="actions"><button id="generate" class="btn primary">Generate Audit</button><button id="previewBtn" class="btn secondary">Preview Image</button></div>
+    <button id="sendBtn" class="btn telegram disabled">Send to Telegram</button>
+    <div id="status" class="status">Ready. September 30 Alphaland sample is loaded for verification.</div>
+  </div>
+  <div id="preview" class="card preview">
+    <h2>Audit Image Preview</h2>
+    <div class="image-shell"><div id="report" class="report"></div></div>
+  </div>
+</div>
+<script>
+const sample={branch:'Alphaland',date:'2026-09-30',status:'FOREX + HIVE RECONCILED • SCRATCH ₱92 OVER',
+sections:[
+['FOREX — PHP CASH RECONCILIATION',false,[['Opening PHP','₱175,413.98'],['+ SELL cash-in','₱122,095.70'],['− BUY cash-out','₱115,944.35'],['− Forex-funded expense','₱11,365.98'],['Expected closing PHP','₱170,199.35','b'],['Actual closing PHP','₱170,199.35','b'],['PHP variance','₱0.00','good'],['Expense detail','Bridge Access Payment ₱11,365.98']]],
+['FOREX — INVENTORY CHECK',false,[['USD','129 + 1,865 − 1,694 = 300 • counted 300'],['JPY','40,000 − 40,000 = 0 • counted 0'],['AUD / EUR / MYR / TWD','300 / 300 / 77 / 700 • unchanged & matched']]],
+['FOREX — PROFIT / INCOME',false,[['USD sale revenue','₱105,959.70'],['USD FIFO cost','₱105,286.48'],['USD gross profit','₱673.22','b'],['JPY sale revenue','₱16,136.00'],['JPY FIFO cost','₱15,400.00'],['JPY gross profit','₱736.00','b'],['FOREX GROSS PROFIT','₱1,409.22','good total'],['Net Forex after expense','−₱9,956.76','bad']]],
+['SCRATCH IT',true,[['Opening cash (Sept 29 closing)','₱17,403.00'],['+ Sales','₱1,280.00'],['− Payouts','₱1,510.00'],['Expected closing','₱17,173.00','b'],['Actual closing count','₱17,265.00','b'],['Scratch variance','OVER ₱92.00','warn'],['Cards sold','64'],['Supplier cost','₱1,152.00'],['SCRATCH GROSS PROFIT','₱128.00','good total']]],
+['HIVE',false,[['Opening balance','₱50,074.37'],['Sept 30 Hive in / out','₱0.00 / ₱0.00'],['Forex borrow / return','₱0.00 / ₱0.00'],['Expected / actual closing','₱50,074.37','b'],['Hive variance','₱0.00','good']]],
+['LOTTOMATIK',false,[['Sept 30 cash movement','No Top-Up / Winning Ticket Payout logged'],['Effect on Forex','None — separate drawer']]],
+['PROFIT SUMMARY',false,[['Forex gross profit','₱1,409.22'],['Scratch gross profit','₱128.00'],['Combined gross profit','₱1,537.22','b'],['Less Forex-funded expense','₱11,365.98'],['NET AFTER EXPENSE','−₱9,828.76','bad total']]]],
+foot:'No missing Forex PHP or foreign currency. Hive reconciled. Scratch is ₱92 OVER, not short; review opening count/manual cash movement. Scratch payouts are cash movement and supplier-reimbursable, so gross profit remains sales less supplier cost.'};
+function esc(s){return String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
+function prettyDate(d){return new Date(d+'T12:00:00').toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'})}
+function render(data){let h=`<div class="rhead"><div class="title">PSULIT ${esc(data.branch.toUpperCase())}</div><div class="sub">COMBINED DAILY AUDIT • ${prettyDate(data.date)}</div></div><div class="banner">✓ STATUS: ${esc(data.status)}</div>`;for(const [t,gold,rows] of data.sections){h+=`<div class="sec"><div class="sec-title ${gold?'gold':''}">${esc(t)}</div>`;for(const r of rows){let c=r[2]||'';h+=`<div class="row ${c.includes('total')?'total':''}"><div>${c==='b'||c.includes('total')?'<strong>'+esc(r[0])+'</strong>':esc(r[0])}</div><div class="v ${c.includes('good')?'good':''} ${c.includes('warn')?'warn':''} ${c.includes('bad')?'bad':''}">${c==='b'||c.includes('total')?'<strong>'+esc(r[1])+'</strong>':esc(r[1])}</div></div>`}h+='</div>'}h+=`<div class="foot"><strong>Audit result:</strong> ${esc(data.foot)}</div>`;document.getElementById('report').innerHTML=h}
+render(sample);
+document.getElementById('generate').onclick=()=>{const b=document.getElementById('branch').value,d=document.getElementById('date').value,st=document.getElementById('status'),send=document.getElementById('sendBtn');if(b==='Alphaland'&&d==='2026-09-30'){render(sample);st.textContent='Audit generated from the verified September 30 report.';send.classList.remove('disabled')}else{st.textContent='Live automatic data sync for this branch/date is not connected yet. The app will not invent figures or mark it reconciled.';send.classList.add('disabled')}};
+document.getElementById('previewBtn').onclick=()=>document.getElementById('preview').scrollIntoView({behavior:'smooth'});
+document.getElementById('sendBtn').onclick=()=>{document.getElementById('status').textContent='Telegram sending is the next backend connection. This preview is ready, but no message was sent from the app yet.'};
+</script>
+</body>
+</html>
