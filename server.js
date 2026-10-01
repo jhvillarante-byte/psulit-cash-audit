@@ -2491,10 +2491,17 @@ app.get(
   (
     req,
     res
-  ) =>
-    res.sendFile(
-      require('path').join(__dirname, 'index.html')
-    )
+  ) => {
+    // Always serve the newest Audit UI; this prevents iPhone/Safari from
+    // keeping an older cached page after a deployment.
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+    return res.sendFile(
+      require('path').join(__dirname, 'index.html'),
+      { cacheControl: false }
+    );
+  }
 );
 
 const PORT =
