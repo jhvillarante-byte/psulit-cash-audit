@@ -206,6 +206,108 @@ app.use(
   })
 );
 
+function manilaDateFromSlackTs(ts) {
+  const d = new Date(Number(ts) * 1000);
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Manila',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).format(d);
+}
+
+function sortByTsAsc(messages) {
+  return [...messages].sort((a, b) => Number(a.ts) - Number(b.ts));
+}
+
+// Read-only daily audit data for the Audit web app.
+// The selected date is resolved from the actual Slack Cash Count / Transaction
+// history, so the report is not tied to one hard-coded calendar date.
+app.get('/api/audit-data', async (req, res) => {
+  try {
+    const branchName = String(req.query.branch || '').trim();
+    const date = String(req.query.date || '').trim();
+    const branchConfig = BRANCHES.find(b => b.name.toLowerCase() === branchName.toLowerCase());
+
+    if (!branchConfig) return res.status(400).json({ error: 'Invalid branch.' });
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Date must be YYYY-MM-DD.' });
+
+    const cashMessages = sortByTsAsc(await collectChannelHistory(branchConfig.cashCountChannelId));
+    const counts = cashMessages
+      .map(message => ({ message, parsed: parseCashCount(message.text || '') }))
+      .filter(item =>
+        item.parsed &&
+        item.parsed.branch === branchConfig.name &&
+        manilaDateFromSlackTs(item.message.ts) === date
+      );
+
+    const openings = counts.filter(item =>
+      String(item.parsed.shift || '').toLowerCase() === 'opening' ||
+      String(item.parsed.phase || '').toLowerCase() === 'opening'
+    );
+    const closings = counts.filter(item =>
+      String(item.parsed.shift || '').toLowerCase() === 'closing' ||
+      String(item.parsed.phase || '').toLowerCase() === 'closing'
+    );
+
+    const opening = openings[0] || null;
+    const closing = closings.length ? closings[closings.length - 1] : null;
+
+    if (!opening || !closing) {
+      return res.status(404).json({
+        error: `No complete opening/closing Cash Count was found for ${branchConfig.name} on ${date}.`,
+        branch: branchConfig.name,
+        date
+      });
+    }
+
+    const oldest = opening.message.ts;
+    const latest = closing.message.ts;
+
+    const [txMessages, hiveMessages, expenseMessages] = await Promise.all([
+      history(branchConfig.transactionsChannelId, { oldest, latest, limit: 200 }),
+      branchConfig.hiveChannelId ? history(branchConfig.hiveChannelId, { oldest, latest, limit: 200 }) : Promise.resolve([]),
+      branchConfig.expensesChannelId ? history(branchConfig.expensesChannelId, { oldest, latest, limit: 200 }) : Promise.resolve([])
+    ]);
+
+    const transactions = txMessages
+      .map(message => ({ ...parseTransaction(message.text || ''), ts: message.ts, user: message.user }))
+      .filter(tx => tx && tx.movements?.length);
+
+    const hiveEntries = hiveMessages
+      .map(message => parseHiveEntry(message.text || ''))
+      .filter(Boolean);
+
+    const expenses = expenseMessages
+      .map(message => parseExpenseEntry(message.text || ''))
+      .filter(Boolean);
+
+    const adjustments = {};
+    const hiveDelta = hiveEntries.reduce((sum, entry) => sum + Number(entry.amount || 0), 0);
+    const expenseDelta = expenses.reduce((sum, entry) => sum + Number(entry.amount || 0), 0);
+    if (hiveDelta) adjustments.Hive = hiveDelta;
+    if (expenseDelta) adjustments.Opex = expenseDelta;
+
+    const openingTotals = { ...(opening.parsed.totals || {}), ...(opening.parsed.others || {}) };
+    const closingTotals = { ...(closing.parsed.totals || {}), ...(closing.parsed.others || {}) };
+    const reconciliation = reconcile(openingTotals, closingTotals, transactions, adjustments);
+
+    return res.json({
+      branch: branchConfig.name,
+      date,
+      opening: opening.parsed,
+      closing: closing.parsed,
+      transactions,
+      hiveDelta,
+      expenseDelta,
+      reconciliation
+    });
+  } catch (err) {
+    console.error('Audit data request failed:', err);
+    return res.status(500).json({ error: 'Audit data unavailable.' });
+  }
+});
+
 function hasValidBalancePreviewSecret(req) {
   const supplied = String(req.get('x-balance-preview-secret') || '');
   if (!BALANCE_PREVIEW_SECRET || supplied.length !== BALANCE_PREVIEW_SECRET.length) return false;
@@ -2390,8 +2492,8 @@ app.get(
     req,
     res
   ) =>
-    res.send(
-      'Psulit Cash Audit is running.'
+    res.sendFile(
+      require('path').join(__dirname, 'index.html')
     )
 );
 
