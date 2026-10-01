@@ -66,6 +66,20 @@ function buildDynamic(data){
   });
   const other=[...new Set([...Object.keys(data.opening.others||{}),...Object.keys(data.closing.others||{})])];
   if(other.length){y+=12;s+=section(M,y,W-M*2,'OTHER FUNDS','#6754C5');y+=50;other.forEach(function(k){const o=Number((data.opening.others||{})[k]||0),cl=Number((data.closing.others||{})[k]||0),d=cl-o;s+=rowOne(y,k+' opening',money(o));y+=46;s+=rowOne(y,k+' closing',money(cl));y+=46;s+=rowOne(y,k+' variance',money(d),{bold:true,bg:Math.abs(d)<0.01?'#EAF8F1':'#FFF0EF',color:Math.abs(d)<0.01?'#08744D':'#B42318'});y+=46})}
+  if(data.scratch){
+    y+=12;s+=section(M,y,W-M*2,'SCRATCH IT','#F4D35E','#7A4B00');y+=50;
+    s+=rowOne(y,'Opening cash',money(data.scratch.opening));y+=46;
+    (data.scratch.salesByProduct||[]).forEach(function(r){
+      s+=rowOne(y,r.product+' sales • '+r.qty+' cards',money(r.sales));y+=46;
+    });
+    s+=rowOne(y,'Total sales',money(data.scratch.sales),{bold:true});y+=46;
+    s+=rowOne(y,'Winning payouts • '+data.scratch.payoutCount+' tickets',money(data.scratch.payouts));y+=46;
+    s+=rowOne(y,'Expected closing',money(data.scratch.expectedClosing),{bold:true,bg:'#FFF7D9'});y+=46;
+    s+=rowOne(y,'Actual closing',money(data.scratch.closing),{bold:true});y+=46;
+    const sv=Number(data.scratch.variance||0);
+    s+=rowOne(y,'Scratch variance',Math.abs(sv)<0.01?'₱0.00':(sv<0?'SHORT ':'OVER ')+money(Math.abs(sv)),{bold:true,bg:sv===0?'#EAF8F1':'#FFF0EF',color:sv===0?'#08744D':'#B42318'});y+=46;
+    s+=rowOne(y,'Gross profit',money(data.scratch.grossProfit),{bold:true,bg:'#EAF8F1',color:'#08744D'});y+=58;
+  }
   y+=12;s+=section(M,y,W-M*2,'ACTIVITY','#0C8B93');y+=50;
   s+=rowOne(y,'Transactions checked',String((data.transactions||[]).length),{bold:true});y+=46;
   s+=rowOne(y,'Hive movement',money(data.hiveDelta||0));y+=46;
