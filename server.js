@@ -46,6 +46,18 @@ const { checkpointType, analyzeHiveWindow, formatDiagnosticReport } = require('.
 const { createLottomatikRouter } = require('./lottomatik-routes');
 const { PostgresDeliveryState } = require('./lottomatik-postgres-state');
 
+const AUDIT_DB_POOL = process.env.SUPABASE_DATABASE_URL
+  ? new Pool({
+      connectionString: process.env.SUPABASE_DATABASE_URL,
+      max: 2,
+      min: 0,
+      connectionTimeoutMillis: 10000,
+      idleTimeoutMillis: 10000,
+      allowExitOnIdle: true,
+      keepAlive: true
+    })
+  : null;
+
 const app = express();
 
 const SIGNING_SECRET =
@@ -292,6 +304,73 @@ app.get('/api/audit-data', async (req, res) => {
     const closingTotals = { ...(closing.parsed.totals || {}), ...(closing.parsed.others || {}) };
     const reconciliation = reconcile(openingTotals, closingTotals, transactions, adjustments);
 
+    // Scratch It is maintained in its own live Supabase ledger, so the audit
+    // app must include it instead of treating Scratch as an unexplained
+    // "other funds" balance.
+    let scratch = null;
+    if (AUDIT_DB_POOL && branchConfig.name.toLowerCase() === 'alphaland') {
+      const scratchResult = await AUDIT_DB_POOL.query(
+        `SELECT
+           t.transaction_type,
+           i.product_name,
+           SUM(i.quantity)::numeric AS qty,
+           SUM(i.line_total)::numeric AS amount,
+           COUNT(DISTINCT t.scratch_id)::int AS tx_count
+         FROM public.scratch_transactions t
+         JOIN public.scratch_transaction_items i ON i.scratch_id = t.scratch_id
+         WHERE t.branch = $1
+           AND t.status = 'Posted'
+           AND t.official_timestamp >= $2::timestamptz
+           AND t.official_timestamp < $3::timestamptz
+         GROUP BY t.transaction_type, i.product_name
+         ORDER BY t.transaction_type, i.product_name`,
+        [branchConfig.name, `${date}T00:00:00+08:00`, `${date}T00:00:00+08:00`]
+      );
+      const summaryResult = await AUDIT_DB_POOL.query(
+        `SELECT transaction_type,
+                COUNT(*)::int AS tx_count,
+                COALESCE(SUM(total_value),0)::numeric AS total_value
+         FROM public.scratch_transactions
+         WHERE branch = $1
+           AND status = 'Posted'
+           AND official_timestamp >= $2::timestamptz
+           AND official_timestamp < $3::timestamptz
+         GROUP BY transaction_type`,
+        [branchConfig.name, `${date}T00:00:00+08:00`, `${date}T00:00:00+08:00`]
+      );
+
+      const sales = scratchResult.rows.filter(r => r.transaction_type === 'SALE');
+      const salesByProduct = sales.map(r => ({
+        product: r.product_name,
+        qty: Number(r.qty || 0),
+        sales: Number(r.amount || 0),
+        unitCost: 18,
+        cost: Number(r.qty || 0) * 18,
+        profit: Number(r.amount || 0) - Number(r.qty || 0) * 18
+      }));
+      const salesTotal = salesByProduct.reduce((n, r) => n + r.sales, 0);
+      const cardsSold = salesByProduct.reduce((n, r) => n + r.qty, 0);
+      const payoutRow = summaryResult.rows.find(r => r.transaction_type === 'PAYOUT');
+      const payoutTotal = Number(payoutRow?.total_value || 0);
+      const payoutCount = Number(payoutRow?.tx_count || 0);
+      const scratchOpening = Number(openingTotals.Scratch || 0);
+      const scratchClosing = Number(closingTotals.Scratch || 0);
+      const expectedClosing = scratchOpening + salesTotal - payoutTotal;
+
+      scratch = {
+        opening: scratchOpening,
+        closing: scratchClosing,
+        sales: salesTotal,
+        payouts: payoutTotal,
+        payoutCount,
+        cardsSold,
+        salesByProduct,
+        expectedClosing,
+        variance: scratchClosing - expectedClosing,
+        grossProfit: salesByProduct.reduce((n, r) => n + r.profit, 0)
+      };
+    }
+
     return res.json({
       branch: branchConfig.name,
       date,
@@ -300,7 +379,8 @@ app.get('/api/audit-data', async (req, res) => {
       transactions,
       hiveDelta,
       expenseDelta,
-      reconciliation
+      reconciliation,
+      scratch
     });
   } catch (err) {
     console.error('Audit data request failed:', err);
