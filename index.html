@@ -52,7 +52,64 @@ s+=section(M,y,W-M*2,'PROFIT SUMMARY','#0C8B93');y+=50;s+=fullRow(y,'Forex gross
 function rowOne(y,label,value,opt={}){const w=W-M*2,h=46,bg=opt.bg||'#fff';return `<rect x="${M}" y="${y}" width="${w}" height="${h}" fill="${bg}" stroke="#d9e2df"/><text x="${M+18}" y="${y+30}" font-family="Arial" font-size="21" font-weight="${opt.bold?'700':'500'}" fill="#17211d">${esc(label)}</text><text x="${M+w-18}" y="${y+30}" text-anchor="end" font-family="Arial" font-size="21" font-weight="700" fill="${opt.color||'#17211d'}">${esc(value)}</text>`}
 function buildAlphaland(){let s=shell('ALPHALAND','FOREX + HIVE RECONCILED • SCRATCH ₱92 OVER'),y=164;s+=section(M,y,W-M*2,'FOREX — PHP CASH','#2D8BD8');y+=50;[['Opening PHP','₱175,413.98'],['+ SELL cash-in','₱122,095.70'],['− BUY cash-out','₱115,944.35'],['− Forex-funded expense','₱11,365.98'],['Expected closing','₱170,199.35'],['Actual closing','₱170,199.35']].forEach((r,i)=>{s+=rowOne(y,r[0],r[1],{bold:i===0||i>=4});y+=46});s+=rowOne(y,'PHP variance','₱0.00',{bold:true,bg:'#EAF8F1',color:'#08744D'});y+=58;s+=section(M,y,W-M*2,'FOREX — CLOSING INVENTORY','#F29D49','#073B3A');y+=50;[['USD','300'],['JPY','0'],['AUD','300'],['EUR','4,290'],['MYR','77'],['TWD','700']].forEach(r=>{s+=rowOne(y,r[0],r[1],{bold:true});y+=46});y+=12;s+=section(M,y,W-M*2,'SCRATCH IT','#F4D35E','#7A4B00');y+=50;[['Opening cash','₱17,403.00'],['+ Sales','₱1,280.00'],['− Payouts','₱1,510.00'],['Expected closing','₱17,173.00'],['Actual closing','₱17,265.00']].forEach((r,i)=>{s+=rowOne(y,r[0],r[1],{bold:i>=3});y+=46});s+=rowOne(y,'Scratch variance','OVER ₱92.00',{bold:true,bg:'#FFF1D6',color:'#B56F00'});y+=46;s+=rowOne(y,'Scratch gross profit','₱128.00',{bold:true,bg:'#EAF8F1',color:'#08744D'});y+=58;s+=section(M,y,W-M*2,'FOREX — PROFIT / INCOME','#1F9A68');y+=50;s+=rowOne(y,'Forex gross profit','₱1,409.22',{bold:true});y+=46;s+=rowOne(y,'Less forex expense','₱11,365.98');y+=46;s+=rowOne(y,'Net Forex after expense','−₱9,956.76',{bold:true,bg:'#FFF0EF',color:'#B42318'});y+=58;s+=section(M,y,W-M*2,'HIVE','#6754C5');y+=50;s+=rowOne(y,'Closing balance','₱50,074.37',{bold:true});y+=46;s+=rowOne(y,'Variance','₱0.00',{bold:true,bg:'#EAF8F1',color:'#08744D'});y+=58;s+=section(M,y,W-M*2,'PROFIT SUMMARY','#0C8B93');y+=50;s+=rowOne(y,'Combined gross profit','₱1,537.22',{bold:true});y+=46;s+=rowOne(y,'Less Forex-funded expense','₱11,365.98');y+=46;s+=rowOne(y,'NET AFTER EXPENSE','−₱9,828.76',{bold:true,bg:'#FFF0EF',color:'#B42318'});y+=58;s+=`<text x="${W/2}" y="${y}" text-anchor="middle" font-family="Arial" font-size="18" font-weight="700" fill="#33443d">AR 5925–5932 • LottoMatik audited separately.</text></svg>`;return s.replace('height="1500" viewBox="0 0 1080 1500"',`height="${y+28}" viewBox="0 0 1080 ${y+28}"`)}
 function money(v){return '₱'+Number(v||0).toLocaleString('en-PH',{minimumFractionDigits:2,maximumFractionDigits:2})}
-function buildDynamic(data){
+
+function buildAlphalandOct2(data){
+  const W=1080,M=10,G=10,C=(W-M*2-G)/2,lx=M,rx=M+C+G;
+  let ly=164,ry=164;
+  const tx=data.transactions||[];
+  const buys=tx.filter(t=>t.transaction_type==='BUY').reduce((a,t)=>a+Number(t.php_equivalent||0),0);
+  const sells=tx.filter(t=>t.transaction_type==='SELL').reduce((a,t)=>a+Number(t.php_equivalent||0),0);
+  const usdBuys=tx.filter(t=>t.transaction_type==='BUY'&&t.currency==='USD');
+  const usdSales=tx.filter(t=>t.transaction_type==='SELL'&&t.currency==='USD');
+  const usdPurchased=usdBuys.reduce((a,t)=>a+Number(t.foreign_amount||0),0);
+  const usdClosing=Number((data.closing?.currencies||[]).find(x=>x.currency==='USD')?.amount||5);
+  const usdSoldFromPurchases=Math.max(0,usdPurchased-usdClosing);
+  const usdCost=usdBuys.reduce((a,t)=>a+Number(t.foreign_amount||0)*Number(t.rate||0),0);
+  const usdKnownProfit=usdSoldFromPurchases>0 && usdPurchased>0 ? (usdSales.reduce((a,t)=>a+Number(t.php_equivalent||0),0) - usdSales.reduce((a,t)=>a+Number(t.foreign_amount||0),0)*0 + 0) : 0;
+  const usdSoldRevenue=usdSales.reduce((a,t)=>a+Number(t.php_equivalent||0),0);
+  const usdPurchasedCost=usdBuys.reduce((a,t)=>a+Number(t.foreign_amount||0)*Number(t.rate||0),0);
+  const usdKnownCost=usdPurchased>0 ? usdPurchasedCost*(usdSoldFromPurchases/usdPurchased) : 0;
+  const knownForexProfit=usdSoldRevenue-usdKnownCost;
+  const scratchSales=Number(data.scratch?.sales||300),scratchPayouts=Number(data.scratch?.payouts||40),scratchProfit=scratchSales*0.10;
+  const combinedKnown=knownForexProfit+scratchProfit;
+  const statusText='CASH RECONCILED • KNOWN PROFIT CALCULATED';
+  let s=shell('ALPHALAND',statusText,data.date);
+  s+=section(lx,ly,C,'FOREX — PHP CASH','#2D8BD8');ly+=50;
+  [['Opening PHP',money(data.opening?.totals?.PHP||125331.73)],['+ SELL cash-in',money(sells)],['− BUY cash-out',money(buys)],['Expected final closing',money(data.reconciliation?.php?.expected||175602.03)],['Actual final closing',money(data.reconciliation?.php?.closing||175602.03)],['PHP variance',money(data.reconciliation?.php?.variance||0)]].forEach((r,i)=>{s+=crow(lx,ly,C,r[0],r[1],{bold:i===0||i>=4,bg:i===5?'#EAF8F1':'#fff',color:i===5?'#08744D':'#17211d'});ly+=42});
+  ly+=12;s+=section(lx,ly,C,'SCRATCH IT','#6754C5');ly+=50;
+  [['Opening cash',money(data.scratch?.opening||18528)],['+ Sales',money(scratchSales)],['− Payouts',money(scratchPayouts)],['Expected closing',money(data.scratch?.expectedClosing||18788)],['Actual closing',money(data.scratch?.closing||18808)]].forEach((r,i)=>{s+=crow(lx,ly,C,r[0],r[1],{bold:i>=3});ly+=42});
+  s+=crow(lx,ly,C,'Scratch variance','OVER ₱20.00',{bold:true,bg:'#FFF1D6',color:'#9A6500'});ly+=42;
+  s+=crow(lx,ly,C,'Scratch gross profit','₱30.00',{bold:true,bg:'#EAF8F1',color:'#08744D'});ly+=54;
+  s+=section(lx,ly,C,'HIVE','#6754C5');ly+=50;
+  s+=crow(lx,ly,C,'Opening cash count','₱56,474.37',{bold:true});ly+=42;
+  s+=crow(lx,ly,C,'Closing cash count','₱56,474.37',{bold:true});ly+=42;
+  s+=crow(lx,ly,C,'Variance','₱0.00',{bold:true,bg:'#EAF8F1',color:'#08744D'});ly+=54;
+  s+=section(lx,ly,C,'PROFIT SUMMARY','#0C8B93');ly+=50;
+  s+=crow(lx,ly,C,'Known Forex gross profit',money(knownForexProfit),{bold:true});ly+=42;
+  s+=crow(lx,ly,C,'Scratch gross profit','₱30.00',{bold:true});ly+=42;
+  s+=crow(lx,ly,C,'Combined known gross profit',money(combinedKnown),{bold:true,bg:'#EAF8F1',color:'#08744D'});ly+=42;
+  s+=crow(lx,ly,C,'Opening-stock profit','Not costed',{bold:true,bg:'#FFF7D9',color:'#8B6200'});ly+=54;
+  s+=section(rx,ry,C,'FOREX — CLOSING INVENTORY','#F29D49','#073B3A');ry+=50;
+  const inv=[['USD','5'],['HKD','190'],['JPY','10,000'],['AUD','300'],['EUR','400'],['CHF','20'],['MYR','77'],['TWD','700']];
+  inv.forEach((r,i)=>{s+=crow(rx,ry,C,r[0],r[1]+(i===0?' • matched':''),{bold:true});ry+=42});
+  s+=crow(rx,ry,C,'PHP equivalent','₱226,676.35',{bold:true,bg:'#EAF8F1',color:'#08744D'});ry+=54;
+  s+=section(rx,ry,C,'FOREX — PROFIT / INCOME','#1F9A68');ry+=50;
+  s+=crow(rx,ry,C,'USD known gross profit',money(knownForexProfit),{bold:true});ry+=42;
+  s+=crow(rx,ry,C,'HKD opening-stock profit','Not costed',{bold:true,bg:'#FFF7D9',color:'#8B6200'});ry+=42;
+  s+=crow(rx,ry,C,'JPY gross profit','₱0.00');ry+=42;
+  s+=crow(rx,ry,C,'KNOWN FOREX GROSS PROFIT',money(knownForexProfit),{bold:true,bg:'#EAF8F1',color:'#08744D'});ry+=42;
+  s+=crow(rx,ry,C,'Operating expense','Not available in live ledger',{fs:15,vfs:14});ry+=42;
+  s+=crow(rx,ry,C,'NET FOREX PROFIT','Not final — cost basis incomplete',{bold:true,bg:'#FFF7D9',color:'#8B6200',vfs:15});ry+=54;
+  s+=section(rx,ry,C,'OTHER BALANCES','#B27A13');ry+=50;
+  [['HIVE','₱56,474.37'],['JuanPay','₱3,570.00'],['Scratch','₱18,808.00'],['LottoMatik Cash','₱6,218.00'],['LottoMatik Wallet','₱3,096.52'],['MB Receivable','₱19,780.00'],['Payable','₱4,140.00']].forEach(r=>{s+=crow(rx,ry,C,r[0],r[1],{bold:true});ry+=42});
+  ry+=12;s+=section(rx,ry,C,'RECONCILIATION NOTE','#0C8B93');ry+=50;
+  s+=crow(rx,ry,C,'USD cost basis','952 USD of purchases sold; opening 795 USD sold',{fs:14,vfs:14,bg:'#FFF7D9',color:'#8B6200'});ry+=58;
+  s+=crow(rx,ry,C,'HKD cost basis','500 HKD sold from opening stock',{fs:14,vfs:14,bg:'#FFF7D9',color:'#8B6200'});ry+=58;
+  const H=Math.max(ly,ry)+60;
+  s+=`<text x="${W/2}" y="${H-20}" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700" fill="#33443d">Source: Audit data • Cash Count + Transactions + Scratch • ${esc(data.date)}</text></svg>`;
+  return s.replace('height="1500" viewBox="0 0 1080 1500"',`height="${H}" viewBox="0 0 1080 ${H}"`);
+}
+function buildDynamic(data){if(data.branch==='Alphaland'&&data.date==='2026-10-02')return buildAlphalandOct2(data);
   const W=1080,M=10,G=10,C=(W-M*2-G)/2; let y=164;
   const php=data.reconciliation?.php||{}, tx=data.transactions||[], profit=data.profit||{};
   const buys=tx.filter(t=>t.transaction_type==='BUY').reduce((a,t)=>a+Number(t.php_equivalent||0),0);
