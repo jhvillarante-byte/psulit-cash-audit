@@ -54,43 +54,36 @@ function buildAlphaland(){let s=shell('ALPHALAND','FOREX + HIVE RECONCILED • S
 function money(v){return '₱'+Number(v||0).toLocaleString('en-PH',{minimumFractionDigits:2,maximumFractionDigits:2})}
 function buildDynamic(data){
   const W=1080,M=10; let y=164;
-  let s=shell(data.branch,'LIVE DATA • OPENING/CLOSING CASH COUNT LOADED',data.date);
-  const allCcy=[...new Set([...Object.keys(data.opening.totals||{}),...Object.keys(data.closing.totals||{})])];
-  s+=section(M,y,W-M*2,'CASH RECONCILIATION','#2D8BD8');y+=50;
-  allCcy.forEach(function(ccy){
-    const open=Number((data.opening.totals||{})[ccy]||0), close=Number((data.closing.totals||{})[ccy]||0);
-    const rec=(data.reconciliation||[]).find(function(r){return r.ccy===ccy}), diff=rec?Number(rec.diff||0):(close-open);
-    s+=rowOne(y,ccy+' opening',ccy==='PHP'?money(open):open.toLocaleString());y+=46;
-    s+=rowOne(y,ccy+' closing',ccy==='PHP'?money(close):close.toLocaleString());y+=46;
-    s+=rowOne(y,ccy+' variance',ccy==='PHP'?money(diff):diff.toLocaleString(),{bold:true,bg:Math.abs(diff)<0.01?'#EAF8F1':'#FFF0EF',color:Math.abs(diff)<0.01?'#08744D':'#B42318'});y+=46;
-  });
-  const other=[...new Set([...Object.keys(data.opening.others||{}),...Object.keys(data.closing.others||{})])];
-  if(other.length){y+=12;s+=section(M,y,W-M*2,'OTHER FUNDS','#6754C5');y+=50;other.forEach(function(k){const o=Number((data.opening.others||{})[k]||0),cl=Number((data.closing.others||{})[k]||0),d=cl-o;s+=rowOne(y,k+' opening',money(o));y+=46;s+=rowOne(y,k+' closing',money(cl));y+=46;s+=rowOne(y,k+' variance',money(d),{bold:true,bg:Math.abs(d)<0.01?'#EAF8F1':'#FFF0EF',color:Math.abs(d)<0.01?'#08744D':'#B42318'});y+=46})}
-  if(data.scratch){
-    y+=12;s+=section(M,y,W-M*2,'SCRATCH IT','#F4D35E','#7A4B00');y+=50;
-    s+=rowOne(y,'Opening cash',money(data.scratch.opening));y+=46;
-    (data.scratch.salesByProduct||[]).forEach(function(r){
-      s+=rowOne(y,r.product+' sales • '+r.qty+' cards',money(r.sales));y+=46;
-    });
-    s+=rowOne(y,'Total sales',money(data.scratch.sales),{bold:true});y+=46;
-    s+=rowOne(y,'Winning payouts • '+data.scratch.payoutCount+' tickets',money(data.scratch.payouts));y+=46;
-    s+=rowOne(y,'Expected closing',money(data.scratch.expectedClosing),{bold:true,bg:'#FFF7D9'});y+=46;
-    s+=rowOne(y,'Actual closing',money(data.scratch.closing),{bold:true});y+=46;
-    const sv=Number(data.scratch.variance||0);
-    s+=rowOne(y,'Scratch variance',Math.abs(sv)<0.01?'₱0.00':(sv<0?'SHORT ':'OVER ')+money(Math.abs(sv)),{bold:true,bg:sv===0?'#EAF8F1':'#FFF0EF',color:sv===0?'#08744D':'#B42318'});y+=46;
-    s+=rowOne(y,'Gross profit',money(data.scratch.grossProfit),{bold:true,bg:'#EAF8F1',color:'#08744D'});y+=58;
-  }
-  y+=12;s+=section(M,y,W-M*2,'ACTIVITY','#0C8B93');y+=50;
+  let s=shell(data.branch,'LIVE • CASH + FOREX + EXPENSES + SCRATCH',data.date);
+  s+=section(M,y,W-M*2,'FOREX — PHP CASH','#2D8BD8');y+=50;
+  const php=data.reconciliation?.php||{};
+  [['Opening PHP',money(php.opening)],['+ SELL cash-in',money((data.transactions||[]).filter(t=>t.transaction_type==='SELL').reduce((a,t)=>a+Number(t.php_equivalent||0),0))],['− BUY cash-out',money((data.transactions||[]).filter(t=>t.transaction_type==='BUY').reduce((a,t)=>a+Number(t.php_equivalent||0),0))],['− Forex-funded expense',money(Math.abs(Number(data.expenseDelta||0)))],['Expected closing',money(php.expected)],['Actual closing',money(php.closing)]].forEach((r,i)=>{s+=rowOne(y,r[0],r[1],{bold:i===0||i>=4});y+=46});
+  const pv=Number(php.variance||0);s+=rowOne(y,'PHP variance',money(pv),{bold:true,bg:Math.abs(pv)<0.01?'#EAF8F1':'#FFF0EF',color:Math.abs(pv)<0.01?'#08744D':'#B42318'});y+=58;
+  s+=section(M,y,W-M*2,'FOREX — CLOSING INVENTORY','#F29D49','#073B3A');y+=50;
+  (data.reconciliation?.currencies||[]).forEach(r=>{s+=rowOne(y,r.currency,Number(r.closing||0).toLocaleString(),{bold:true,bg:Math.abs(Number(r.variance||0))<0.01?'#fff':'#FFF0EF',color:Math.abs(Number(r.variance||0))<0.01?'#17211d':'#B42318'});y+=46});
+  y+=12;s+=section(M,y,W-M*2,'SCRATCH IT','#F4D35E','#7A4B00');y+=50;
+  [['Opening cash',money(data.scratch?.opening)],['+ Sales',money(data.scratch?.sales)],['− Payouts',money(data.scratch?.payouts)],['Expected closing',money(data.scratch?.expectedClosing)],['Actual closing',money(data.scratch?.closing)]].forEach((r,i)=>{s+=rowOne(y,r[0],r[1],{bold:i>=3});y+=46});
+  const sv=Number(data.scratch?.variance||0);s+=rowOne(y,'Scratch variance',Math.abs(sv)<.01?'₱0.00':(sv<0?'SHORT ':'OVER ')+money(Math.abs(sv)),{bold:true,bg:sv===0?'#EAF8F1':'#FFF0EF',color:sv===0?'#08744D':'#B42318'});y+=46;s+=rowOne(y,'Gross profit',money(data.scratch?.grossProfit),{bold:true,bg:'#EAF8F1',color:'#08744D'});y+=58;
+  s+=section(M,y,W-M*2,'FOREX — PROFIT / EXPENSE','#1F9A68');y+=50;
+  const gp=data.profit?.grossProfit;
+  s+=rowOne(y,'Forex gross profit',gp==null?'NOT AVAILABLE FROM SHEET':money(gp),{bold:true});y+=46;
+  s+=rowOne(y,'Forex-funded expense',money(Math.abs(Number(data.expenseDelta||0))));y+=46;
+  s+=rowOne(y,'Net Forex after expense',gp==null?'NOT CALCULATED':money(Number(data.profit.netAfterExpense||0)),{bold:true,bg:gp==null?'#FFF7D9':(Number(data.profit.netAfterExpense||0)<0?'#FFF0EF':'#EAF8F1'),color:gp==null?'#8B6200':(Number(data.profit.netAfterExpense||0)<0?'#B42318':'#08744D')});y+=58;
+  s+=section(M,y,W-M*2,'OTHER FUNDS','#6754C5');y+=50;
+  const controls=data.controls||{};[['HIVE',controls.hive?.opening,controls.hive?.closing],['JuanPay',controls.juanPay?.opening,controls.juanPay?.closing],['LottoMatik Cash',controls.lottomatikCash?.opening,controls.lottomatikCash?.closing],['LottoMatik Wallet',controls.lottomatikWallet?.opening,controls.lottomatikWallet?.closing]].forEach(r=>{s+=rowOne(y,r[0]+' opening',money(r[1]));y+=46;s+=rowOne(y,r[0]+' closing',money(r[2]));y+=46});y+=12;
+  s+=section(M,y,W-M*2,'PROFIT / CONTROL SUMMARY','#0C8B93');y+=50;
+  const combined=(gp==null?null:Number(gp)+Number(data.scratch?.grossProfit||0));
+  s+=rowOne(y,'Combined gross profit',combined==null?'NOT CALCULATED':money(combined),{bold:true});y+=46;
+  s+=rowOne(y,'Less Forex-funded expense',money(Math.abs(Number(data.expenseDelta||0))));y+=46;
   s+=rowOne(y,'Transactions checked',String((data.transactions||[]).length),{bold:true});y+=46;
-  s+=rowOne(y,'Hive movement',money(data.hiveDelta||0));y+=46;
-  s+=rowOne(y,'Expense movement',money(data.expenseDelta||0));y+=46;
-  s+=rowOne(y,'Closing Cash Count ref',String(data.closing.refCode||'—'),{bold:true});y+=58;
-  s+='<text x="'+(W/2)+'" y="'+y+'" text-anchor="middle" font-family="Arial" font-size="18" font-weight="700" fill="#33443d">Generated from live Cash Count / transaction history for '+esc(data.date)+'.</text></svg>';
+  s+=rowOne(y,'Expenses checked',String((data.expenses||[]).length),{bold:true});y+=46;
+  s+=rowOne(y,'Closing Cash Count ref',String(data.closing?.reference||'—'),{bold:true});y+=58;
+  s+='<text x="'+(W/2)+'" y="'+y+'" text-anchor="middle" font-family="Arial" font-size="18" font-weight="700" fill="#33443d">Source: Google Sheets • Cash Count + Transactions + Expense & Cash Movement • '+esc(data.date)+'</text></svg>';
   return s.replace('height="1500" viewBox="0 0 1080 1500"','height="'+(y+30)+'" viewBox="0 0 1080 '+(y+30)+'"');
 }
 async function svgToPng(svg){const blob=new Blob([svg],{type:'image/svg+xml;charset=utf-8'}),url=URL.createObjectURL(blob),im=new Image();return await new Promise((ok,no)=>{im.onload=()=>{const c=document.createElement('canvas');const scale=1.6;c.width=Math.round(im.width*scale);c.height=Math.round(im.height*scale);const ctx=c.getContext('2d');ctx.scale(scale,scale);ctx.drawImage(im,0,0);URL.revokeObjectURL(url);ok(c.toDataURL('image/png'))};im.onerror=e=>{URL.revokeObjectURL(url);no(e)};im.src=url})}
 function reset(){imgWrap.classList.add('hidden');png.removeAttribute('src');badge.textContent='Not generated';send.classList.add('disabled');send.textContent='Send to Telegram'}
 type.onchange=()=>{dateBox.classList.toggle('hidden',type.value==='monthly');monthBox.classList.toggle('hidden',type.value!=='monthly');reset();setStatus(type.value==='monthly'?'Month-End is temporarily blocked while September history is finalized.':'Daily mode selected.')};branch.onchange=()=>{reset();setStatus(`${branch.value} daily audit selected.`)};date.onchange=reset;month.onchange=reset;
 $('generate').onclick=async()=>{reset();if(type.value==='monthly'){setStatus('Month-End is under verification and cannot be generated yet.',true);return}if(!date.value){setStatus('Please select an audit date.',true);return}try{setStatus('Loading live audit data…');const r=await fetch(SUPA+'/functions/v1/psulit-audit-data?branch='+encodeURIComponent(branch.value)+'&date='+encodeURIComponent(date.value),{headers:{'Authorization':'Bearer '+ANON,'apikey':ANON}});const data=await r.json().catch(()=>({}));if(!r.ok)throw new Error(data.error||'No complete audit data found for this date.');const svg=buildDynamic(data);png.src=await svgToPng(svg);imgWrap.classList.remove('hidden');badge.textContent='PNG Ready';send.classList.remove('disabled');setStatus(branch.value+' '+date.value+' audit PNG is ready from live data.')}catch(e){setStatus(e&&e.message?e.message:'Could not load audit data.',true)}};$('view').onclick=()=>previewCard.scrollIntoView({behavior:'smooth'});
-send.onclick=async()=>{if(send.classList.contains('disabled'))return;send.classList.add('disabled');send.textContent='Sending…';try{const endpoint=SUPA+'/functions/v1/psulit-audit-send-oct1?key=ALPHALAND-AUDIT-20261001';const body={type:'daily',branch:branch.value,date:date.value};const r=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+ANON,'apikey':ANON},body:JSON.stringify(body)});const data=await r.json().catch(()=>({}));if(!r.ok||data.ok!==true)throw new Error(data.error||('HTTP '+r.status));badge.textContent='Sent';setStatus('Sent successfully'+(data.threadId?' • Topic '+data.threadId:'')+(data.messageId?' • Message '+data.messageId:'')+'.');send.textContent='Sent to Telegram'}catch(e){setStatus('Telegram send failed: '+(e&&e.message?e.message:e),true);send.textContent='Send to Telegram';send.classList.remove('disabled')}}
+send.onclick=async()=>{if(send.classList.contains('disabled'))return;send.classList.add('disabled');send.textContent='Sending…';try{const endpoint=SUPA+'/functions/v1/psulit-audit-send';const body={type:'daily',branch:branch.value,date:date.value,imageDataUrl:png.src};const r=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+ANON,'apikey':ANON},body:JSON.stringify(body)});const data=await r.json().catch(()=>({}));if(!r.ok||data.ok!==true)throw new Error(data.error||('HTTP '+r.status));badge.textContent='Sent';setStatus('Sent successfully'+(data.threadId?' • Topic '+data.threadId:'')+(data.messageId?' • Message '+data.messageId:'')+'.');send.textContent='Sent to Telegram'}catch(e){setStatus('Telegram send failed: '+(e&&e.message?e.message:e),true);send.textContent='Send to Telegram';send.classList.remove('disabled')}}
 </script></body></html>
