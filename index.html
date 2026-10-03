@@ -109,86 +109,127 @@ function buildAlphalandOct2(data){
   s+=`<text x="${W/2}" y="${H-20}" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700" fill="#33443d">Source: Audit data • Cash Count + Transactions + Scratch • ${esc(data.date)}</text></svg>`;
   return s.replace('height="1500" viewBox="0 0 1080 1500"',`height="${H}" viewBox="0 0 1080 ${H}"`);
 }
-function buildDynamic(data){const isSolaire=String(data.branch||'').trim().toLowerCase()==='solaire';if(data.branch==='Alphaland'&&data.date==='2026-10-02')return buildAlphalandOct2(data);
-  const W=1080,M=10,G=10,C=(W-M*2-G)/2; let y=164;
-  const php=data.reconciliation?.php||{}, tx=data.transactions||[], profit=data.profit||{};
+function buildDynamic(data){
+  const isSolaire=String(data.branch||'').trim().toLowerCase()==='solaire';
+  const W=1200,M=24,C=W-M*2;
+  let y=170;
+  const php=data.reconciliation?.php||{},tx=data.transactions||[],profit=data.profit||{};
   const buys=tx.filter(t=>t.transaction_type==='BUY').reduce((a,t)=>a+Number(t.php_equivalent||0),0);
   const sells=tx.filter(t=>t.transaction_type==='SELL').reduce((a,t)=>a+Number(t.php_equivalent||0),0);
-  const statusText=Math.abs(Number(php.variance||0))<0.01?'FOREX CASH RECONCILED':'FOREX CASH VARIANCE '+money(Math.abs(Number(php.variance||0)));
+  const statusText=Math.abs(Number(php.variance||0))<0.01?'FOREX CASH RECONCILED':'FOREX CASH DIFFERENCE '+money(Math.abs(Number(php.variance||0)));
   let s=shell(data.branch,statusText+' • KNOWN FOREX GROSS PROFIT '+money(profit.grossProfit||0),data.date);
-  let ly=164,ry=164;
-  s+=section(M,ly,C,'FOREX — PHP CASH','#2D8BD8');ly+=50;
-  [['Opening PHP',money(php.opening)],['+ SELL cash-in',money(sells)],['− BUY cash-out',money(buys)],['− Forex-funded expense',money(Math.abs(Number(data.expenseDelta||0)))],['Expected closing',money(php.expected)],['Actual closing',money(php.closing)]].forEach((r,i)=>{s+=crow(M,ly,C,r[0],r[1],{bold:i===0||i>=4});ly+=42});
-  const pv=Number(php.variance||0);s+=crow(M,ly,C,'PHP variance',money(pv),{bold:true,bg:Math.abs(pv)<.01?'#EAF8F1':'#FFF0EF',color:Math.abs(pv)<.01?'#08744D':'#B42318'});ly+=54;
+  const row=(label,value,opt={})=>{const o={...opt,fs:opt.fs||25,vfs:opt.vfs||25,h:opt.h||52};return crow(M,y,C,label,value,o)};
+  const addSection=(title,bg,color='#fff')=>{s+=section(M,y,C,title,bg,color);y+=56};
+  const addRow=(label,value,opt={})=>{s+=row(label,value,opt);y+=52};
+  const addGap=()=>{y+=16};
+
+  addSection('FOREX — PHP CASH','#2D8BD8');
+  addRow('Opening PHP',money(php.opening),{bold:true});
+  addRow('+ SELL cash-in',money(sells));
+  addRow('− BUY cash-out',money(buys));
+  if(Number(data.expenseDelta||0)!==0)addRow('− Forex-funded expense',money(Math.abs(Number(data.expenseDelta||0))));
+  addRow('Expected closing',money(php.expected),{bold:true,bg:'#F5FAF7'});
+  addRow('Actual closing',money(php.closing),{bold:true});
+  const pv=Number(php.variance||0);
+  addRow('DIFFERENCE',Math.abs(pv)<.01?'₱0.00':'₱'+Math.abs(pv).toLocaleString('en-PH',{minimumFractionDigits:2,maximumFractionDigits:2}),{bold:true,bg:Math.abs(pv)<.01?'#EAF8F1':'#FFF0EF',color:Math.abs(pv)<.01?'#08744D':'#B42318'});
+  addGap();
+
   if(!isSolaire){
-    s+=section(M,ly,C,'SCRATCH IT','#6754C5');ly+=50;
-    [['Opening cash',money(data.scratch?.opening)],['+ Sales',money(data.scratch?.sales)],['− Payouts',money(data.scratch?.payouts)],['Expected closing',money(data.scratch?.expectedClosing)],['Actual closing',money(data.scratch?.closing)]].forEach((r,i)=>{s+=crow(M,ly,C,r[0],r[1],{bold:i>=3});ly+=42});
-    const sv=Number(data.scratch?.variance||0);s+=crow(M,ly,C,'Scratch variance',sv<0?'SHORT '+money(Math.abs(sv)):sv>0?'OVER '+money(sv):'₱0.00',{bold:true,bg:sv===0?'#EAF8F1':'#FFF1D6',color:sv===0?'#08744D':'#9A6500'});ly+=42;
-    s+=crow(M,ly,C,'Gross profit',money(data.scratch?.grossProfit),{bold:true,bg:'#EAF8F1',color:'#08744D'});ly+=54;
+    addSection('SCRATCH IT','#6754C5');
+    addRow('Opening cash',money(data.scratch?.opening));
+    addRow('+ Sales',money(data.scratch?.sales));
+    addRow('− Payouts',money(data.scratch?.payouts));
+    addRow('Expected closing',money(data.scratch?.expectedClosing),{bold:true,bg:'#F5FAF7'});
+    addRow('Actual closing',money(data.scratch?.closing),{bold:true});
+    const sv=Number(data.scratch?.variance||0);
+    addRow('DIFFERENCE',sv===0?'₱0.00':(sv>0?'OVER ':'SHORT ')+money(Math.abs(sv)),{bold:true,bg:sv===0?'#EAF8F1':'#FFF1D6',color:sv===0?'#08744D':'#9A6500'});
+    addRow('Gross profit',money(data.scratch?.grossProfit),{bold:true,bg:'#EAF8F1',color:'#08744D'});
+    addGap();
   }
-  s+=section(M,ly,C,'HIVE','#6754C5');ly+=50;
-  const hiveOpening=Number(data.controls?.hive?.opening||0),hiveClosing=Number(data.controls?.hive?.closing||0),hiveExpense=Number(data.controls?.hive?.expense||0),hiveExpected=Number(data.controls?.hive?.expected??(hiveOpening+hiveExpense)),hiveVariance=hiveClosing-hiveExpected;
-  s+=crow(M,ly,C,'Opening cash count',money(hiveOpening));ly+=42;
-  s+=crow(M,ly,C,'− Hive-funded expense',money(Math.abs(hiveExpense)));ly+=42;
-  s+=crow(M,ly,C,'Expected closing',money(hiveExpected),{bold:true});ly+=42;
-  s+=crow(M,ly,C,'Actual closing',money(hiveClosing),{bold:true});ly+=42;
-  s+=crow(M,ly,C,'Variance',money(hiveVariance),{bold:true,bg:Math.abs(hiveVariance)<.01?'#EAF8F1':'#FFF0EF',color:Math.abs(hiveVariance)<.01?'#08744D':'#B42318'});ly+=54;
-  s+=section(M,ly,C,'PROFIT SUMMARY','#0C8B93');ly+=50;
-  const scratchProfit=isSolaire?0:Number(data.scratch?.grossProfit||0);
-  const combined=Number(profit.grossProfit||0)+scratchProfit;
-  s+=crow(M,ly,C,'Known Forex gross profit',money(profit.grossProfit),{bold:true});ly+=42;
-  if(!isSolaire){s+=crow(M,ly,C,'Scratch gross profit',money(data.scratch?.grossProfit));ly+=42;}
-  s+=crow(M,ly,C,'Combined gross profit',money(combined),{bold:true,bg:'#EAF8F1',color:'#08744D'});ly+=42;s+=crow(M,ly,C,'Less Forex expense',money(Math.abs(Number(data.expenseDelta||0))));ly+=42;
-  const net=combined+Number(data.expenseDelta||0);s+=crow(M,ly,C,'NET AFTER EXPENSE',money(net),{bold:true,bg:net<0?'#FFF0EF':'#EAF8F1',color:net<0?'#B42318':'#08744D'});ly+=42;s+=crow(M,ly,C,'Transactions checked',String(tx.length),{bold:true});ly+=54;
-  s+=section(M+C+G,ry,C,'FOREX — INVENTORY CHECK','#F29D49','#073B3A');ry+=50;
-  const openingFx=data.opening?.totals||{}, closingFx=data.closing?.totals||{};
+
+  addSection('HIVE','#6754C5');
+  const hiveOpening=Number(data.controls?.hive?.opening||0);
+  const hiveClosing=Number(data.controls?.hive?.closing||0);
+  const hiveExpense=Number(data.controls?.hive?.expense||0);
+  const hiveExpected=Number(data.controls?.hive?.expected??(hiveOpening+hiveExpense));
+  const hiveDifference=hiveClosing-hiveExpected;
+  addRow('Opening cash count',money(hiveOpening),{bold:true});
+  if(hiveExpense!==0)addRow('− Hive-funded expense',money(Math.abs(hiveExpense)));
+  addRow('Expected closing',money(hiveExpected),{bold:true,bg:'#F5FAF7'});
+  addRow('Actual closing',money(hiveClosing),{bold:true});
+  addRow('DIFFERENCE',Math.abs(hiveDifference)<.01?'₱0.00':money(hiveDifference),{bold:true,bg:Math.abs(hiveDifference)<.01?'#EAF8F1':'#FFF0EF',color:Math.abs(hiveDifference)<.01?'#08744D':'#B42318'});
+  addGap();
+
+  addSection('FOREX — INVENTORY CHECK','#F29D49','#073B3A');
+  const openingFx=data.opening?.totals||{},closingFx=data.closing?.totals||{};
   const fxCurrencies=[...new Set((data.reconciliation?.currencies||[]).map(x=>x.currency).concat(tx.map(t=>String(t.currency||'').toUpperCase())).filter(Boolean))];
+  const ref=(t)=>{const r=String(t.ref||t.reference||t.transaction_ref||'').trim();return r?( /^\d+$/.test(r)?'AR '+r.padStart(7,'0'):r):''};
   fxCurrencies.forEach(ccy=>{
-    const opening=Number(openingFx[ccy]||0);
-    const actual=Number(closingFx[ccy]||0);
+    const opening=Number(openingFx[ccy]||0),actual=Number(closingFx[ccy]||0);
     const ccyTx=tx.filter(t=>String(t.currency||'').toUpperCase()===ccy);
     const buysC=ccyTx.filter(t=>String(t.transaction_type||'').toUpperCase()==='BUY');
     const sellsC=ccyTx.filter(t=>String(t.transaction_type||'').toUpperCase()==='SELL');
     const buyQty=buysC.reduce((a,t)=>a+Number(t.foreign_amount||0),0);
     const sellQty=sellsC.reduce((a,t)=>a+Number(t.foreign_amount||0),0);
     const expected=opening+buyQty-sellQty;
-    const diff=actual-expected;
-    const ref=(t)=>{const r=String(t.ref||t.reference||t.transaction_ref||'').trim();return r?( /^\\d+$/.test(r)?'AR '+r.padStart(7,'0'):r):''};
+    const difference=actual-expected;
     const buyRefs=buysC.map(ref).filter(Boolean);
     const sellRefs=sellsC.map(ref).filter(Boolean);
-    s+=crow(M+C+G,ry,C,ccy+' — Opening',opening.toLocaleString('en-PH'),{bold:true});ry+=38;
-    if(buyQty||buyRefs.length){s+=crow(M+C+G,ry,C,'+ AR — BUY',buyQty.toLocaleString('en-PH')+(buyRefs.length?'  ['+buyRefs.join(', ')+']':''),{vfs:14});ry+=38;}
-    if(sellQty||sellRefs.length){s+=crow(M+C+G,ry,C,'− AR — SELL',sellQty.toLocaleString('en-PH')+(sellRefs.length?'  ['+sellRefs.join(', ')+']':''),{vfs:14});ry+=38;}
-    s+=crow(M+C+G,ry,C,'Expected closing',expected.toLocaleString('en-PH'),{bold:true,bg:'#F5FAF7'});ry+=38;
-    s+=crow(M+C+G,ry,C,'Actual closing',actual.toLocaleString('en-PH'),{bold:true});ry+=38;
-    s+=crow(M+C+G,ry,C,'CHECK',Math.abs(diff)<0.01?'✓ MATCHED':'✕ DIFFERENCE '+(diff>0?'+':'')+diff.toLocaleString('en-PH'),{bold:true,bg:Math.abs(diff)<0.01?'#EAF8F1':'#FFF0EF',color:Math.abs(diff)<0.01?'#08744D':'#B42318'});ry+=50;
+    addRow(ccy+' — Opening',opening.toLocaleString('en-PH'),{bold:true,fs:24,vfs:24});
+    if(buyQty||buyRefs.length)addRow('+ AR — BUY',buyQty.toLocaleString('en-PH')+(buyRefs.length?'   ['+buyRefs.join(', ')+']':''),{fs:22,vfs:21});
+    if(sellQty||sellRefs.length)addRow('− AR — SELL',sellQty.toLocaleString('en-PH')+(sellRefs.length?'   ['+sellRefs.join(', ')+']':''),{fs:22,vfs:21});
+    addRow('Expected closing',expected.toLocaleString('en-PH'),{bold:true,bg:'#F5FAF7'});
+    addRow('Actual closing',actual.toLocaleString('en-PH'),{bold:true});
+    addRow('CHECK',Math.abs(difference)<.01?'✓ MATCHED':'✕ DIFFERENCE '+(difference>0?'+':'')+difference.toLocaleString('en-PH'),{bold:true,bg:Math.abs(difference)<.01?'#EAF8F1':'#FFF0EF',color:Math.abs(difference)<.01?'#08744D':'#B42318'});
+    addGap();
   });
-  ry+=10;s+=crow(M+C+G,ry,C,'PHP equivalent',money(data.closing?.totals?.PHP||0),{bold:true,bg:'#EAF8F1',color:'#08744D'});ry+=54;
-  s+=section(M+C+G,ry,C,'FOREX — PROFIT / INCOME','#1F9A68');ry+=50;
+  addGap();
+
+  addSection('PROFIT SUMMARY','#0C8B93');
+  const scratchProfit=isSolaire?0:Number(data.scratch?.grossProfit||0);
+  const combined=Number(profit.grossProfit||0)+scratchProfit;
+  addRow('Known Forex gross profit',money(profit.grossProfit),{bold:true});
+  if(!isSolaire)addRow('Scratch gross profit',money(data.scratch?.grossProfit));
+  addRow('Combined gross profit',money(combined),{bold:true,bg:'#EAF8F1',color:'#08744D'});
+  addRow('Less Forex expense',money(Math.abs(Number(data.expenseDelta||0))));
+  const net=combined+Number(data.expenseDelta||0);
+  addRow('NET AFTER EXPENSE',money(net),{bold:true,bg:net<0?'#FFF0EF':'#EAF8F1',color:net<0?'#B42318':'#08744D'});
+  addRow('Transactions checked',String(tx.length),{bold:true});
+  addGap();
+
+  addSection('FOREX — PROFIT / INCOME','#1F9A68');
   const profitBasisComplete=profit.profitBasisComplete!==false;
   if(profitBasisComplete){
-    (profit.byCurrency||[]).filter(x=>Math.abs(Number(x.knownProfit||0))>.005||Number(x.knownQty||0)>0).forEach(x=>{s+=crow(M+C+G,ry,C,x.currency+' known gross profit',money(x.knownProfit),{bold:true});ry+=42});
+    (profit.byCurrency||[]).filter(x=>Math.abs(Number(x.knownProfit||0))>.005||Number(x.knownQty||0)>0).forEach(x=>{
+      addRow(x.currency+' known gross profit',money(x.knownProfit),{bold:true});
+    });
   }else{
-    s+=crow(M+C+G,ry,C,'Profit basis status','INCOMPLETE — opening stock sold',{fs:15,vfs:15,bg:'#FFF7D9',color:'#8B6200'});ry+=42;
-    s+=crow(M+C+G,ry,C,'Reported Forex gross profit',money(profit.grossProfit),{bold:true,bg:'#EAF8F1',color:'#08744D'});ry+=42;
+    addRow('Profit basis status','INCOMPLETE — opening stock sold',{fs:21,vfs:21,bg:'#FFF7D9',color:'#8B6200'});
   }
-  s+=crow(M+C+G,ry,C,'KNOWN FOREX GROSS PROFIT',money(profit.grossProfit),{bold:true,bg:'#EAF8F1',color:'#08744D'});ry+=42;s+=crow(M+C+G,ry,C,'Less Forex-funded expense',money(Math.abs(Number(data.expenseDelta||0))));ry+=42;s+=crow(M+C+G,ry,C,'NET FOREX PROFIT',money(profit.netAfterExpense),{bold:true,bg:Number(profit.netAfterExpense||0)<0?'#FFF0EF':'#EAF8F1',color:Number(profit.netAfterExpense||0)<0?'#B42318':'#08744D'});ry+=54;
-  s+=section(M+C+G,ry,C,'OTHER BALANCES','#B27A13');ry+=50;
+  addRow('KNOWN FOREX GROSS PROFIT',money(profit.grossProfit),{bold:true,bg:'#EAF8F1',color:'#08744D'});
+  addRow('Less Forex-funded expense',money(Math.abs(Number(data.expenseDelta||0))));
+  addRow('NET FOREX PROFIT',money(profit.netAfterExpense),{bold:true,bg:Number(profit.netAfterExpense||0)<0?'#FFF0EF':'#EAF8F1',color:Number(profit.netAfterExpense||0)<0?'#B42318':'#08744D'});
+  addGap();
+
+  addSection('OTHER BALANCES','#B27A13');
   const o=data.opening?.totals||{},c=data.closing?.totals||{};
-  const otherBalances=[['HIVE',o.HIVE,c.HIVE]];
-  if(!isSolaire){
-    otherBalances.push(['JuanPay',o.JuanPay,c.JuanPay],['Scratch',o.Scratch,c.Scratch],['LottoMatik Cash',o.LottoMatikCash,c.LottoMatikCash],['LottoMatik Wallet',o.LottoMatikWallet,c.LottoMatikWallet]);
-  }
-  otherBalances.forEach(r=>{s+=crow(M+C+G,ry,C,r[0]+' opening',money(r[1]));ry+=42;s+=crow(M+C+G,ry,C,r[0]+' closing',money(r[2]),{bold:true});ry+=42});
-  ry+=10;s+=section(M+C+G,ry,C,'TRANSACTION REFERENCES','#0C8B93');ry+=50;
+  const other=[['HIVE',o.HIVE,c.HIVE]];
+  if(!isSolaire)other.push(['JuanPay',o.JuanPay,c.JuanPay],['Scratch',o.Scratch,c.Scratch],['LottoMatik Cash',o.LottoMatikCash,c.LottoMatikCash],['LottoMatik Wallet',o.LottoMatikWallet,c.LottoMatikWallet]);
+  other.forEach(r=>{addRow(r[0]+' opening',money(r[1]));addRow(r[0]+' closing',money(r[2]),{bold:true});});
+  addGap();
+
+  addSection('TRANSACTION REFERENCES','#0C8B93');
   const arRefs=[...new Set(tx.map(t=>String(t.ref||t.reference||t.transaction_ref||'').trim()).filter(Boolean))];
-  const arText=arRefs.length?arRefs.map(r=>/^\\d+$/.test(r)?'AR '+r.padStart(7,'0'):r).join(' • '):'No transaction references available';
-  s+=crow(M+C+G,ry,C,'AR / ticket references',arText,{fs:14,vfs:14,bg:'#F5FAF7'});ry+=Math.max(54,Math.ceil(arText.length/42)*24);
-  s+=section(M+C+G,ry,C,'RECONCILIATION NOTE','#0C8B93');ry+=50;
+  const arText=arRefs.length?arRefs.map(r=>/^\d+$/.test(r)?'AR '+r.padStart(7,'0'):r).join(' • '):'No transaction references available';
+  addRow('AR / ticket references',arText,{fs:20,vfs:19,bg:'#F5FAF7'});
+  addGap();
+
+  addSection('RECONCILIATION NOTE','#0C8B93');
   const note=(profit.byCurrency||[]).filter(x=>Number(x.unmatchedOpeningQty||0)>0).map(x=>x.currency+' '+Number(x.unmatchedOpeningQty).toLocaleString()+' sold from opening stock').join(' • ');
-  s+=crow(M+C+G,ry,C,'Opening-stock cost basis',note||'None unmatched',{fs:15,vfs:15,bg:'#FFF7D9',color:'#8B6200'});ry+=54;
-  s+='<text x="'+(W/2)+'" y="'+(Math.max(ly,ry)+22)+'" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700" fill="#33443d">Source: live Audit data • Cash Count + Transactions'+(isSolaire?'':' + Scratch')+' • '+esc(data.date)+'</text></svg>';
-  const H=Math.max(ly,ry)+52;return s.replace('height="1500" viewBox="0 0 1080 1500"','height="'+H+'" viewBox="0 0 1080 '+H+'"');
+  addRow('Opening-stock cost basis',note||'None unmatched',{fs:20,vfs:19,bg:'#FFF7D9',color:'#8B6200'});
+  y+=20;
+  s+='<text x="'+(W/2)+'" y="'+y+'" text-anchor="middle" font-family="Arial" font-size="18" font-weight="700" fill="#33443d">Source: live Audit data • Cash Count + Transactions'+(isSolaire?'':' + Scratch')+' • '+esc(data.date)+'</text></svg>';
+  return s.replace('width="1080" height="1500" viewBox="0 0 1080 1500"','width="'+W+'" height="'+(y+42)+'" viewBox="0 0 '+W+' '+(y+42)+'"');
 }
 async function svgToPng(svg){const blob=new Blob([svg],{type:'image/svg+xml;charset=utf-8'}),url=URL.createObjectURL(blob),im=new Image();return await new Promise((ok,no)=>{im.onload=()=>{const c=document.createElement('canvas');const scale=1.6;c.width=Math.round(im.width*scale);c.height=Math.round(im.height*scale);const ctx=c.getContext('2d');ctx.scale(scale,scale);ctx.drawImage(im,0,0);URL.revokeObjectURL(url);ok(c.toDataURL('image/png'))};im.onerror=e=>{URL.revokeObjectURL(url);no(e)};im.src=url})}
 function reset(){imgWrap.classList.add('hidden');png.removeAttribute('src');badge.textContent='Not generated';send.classList.add('disabled');send.textContent='Send to Telegram'}
