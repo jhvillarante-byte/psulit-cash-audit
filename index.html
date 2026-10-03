@@ -173,11 +173,17 @@ function buildDynamic(data){
     const sellQty=sellsC.reduce((a,t)=>a+Number(t.foreign_amount||0),0);
     const expected=opening+buyQty-sellQty;
     const difference=actual-expected;
-    const buyRefs=buysC.map(ref).filter(Boolean);
-    const sellRefs=sellsC.map(ref).filter(Boolean);
     addRow(ccy+' — Opening',opening.toLocaleString('en-PH'),{bold:true,fs:24,vfs:24});
-    if(buyQty||buyRefs.length)addRow('+ AR — BUY',buyQty.toLocaleString('en-PH')+(buyRefs.length?'   ['+buyRefs.join(', ')+']':''),{fs:22,vfs:21});
-    if(sellQty||sellRefs.length)addRow('− AR — SELL',sellQty.toLocaleString('en-PH')+(sellRefs.length?'   ['+sellRefs.join(', ')+']':''),{fs:22,vfs:21});
+    buysC.forEach(t=>{
+      const r=ref(t);
+      const qty=Number(t.foreign_amount||0).toLocaleString('en-PH');
+      addRow('+ BUY',qty+(r?'   '+r:''),{fs:22,vfs:21});
+    });
+    sellsC.forEach(t=>{
+      const r=ref(t);
+      const qty=Number(t.foreign_amount||0).toLocaleString('en-PH');
+      addRow('− SELL',qty+(r?'   '+r:''),{fs:22,vfs:21});
+    });
     addRow('Expected closing',expected.toLocaleString('en-PH'),{bold:true,bg:'#F5FAF7'});
     addRow('Actual closing',actual.toLocaleString('en-PH'),{bold:true});
     addRow('CHECK',Math.abs(difference)<.01?'✓ MATCHED':'✕ DIFFERENCE '+(difference>0?'+':'')+difference.toLocaleString('en-PH'),{bold:true,bg:Math.abs(difference)<.01?'#EAF8F1':'#FFF0EF',color:Math.abs(difference)<.01?'#08744D':'#B42318'});
@@ -220,8 +226,8 @@ function buildDynamic(data){
 
   addSection('TRANSACTION REFERENCES','#0C8B93');
   const arRefs=[...new Set(tx.map(t=>String(t.ref||t.reference||t.transaction_ref||'').trim()).filter(Boolean))];
-  const arText=arRefs.length?arRefs.map(r=>/^\d+$/.test(r)?'AR '+r.padStart(7,'0'):r).join(' • '):'No transaction references available';
-  addRow('AR / ticket references',arText,{fs:20,vfs:19,bg:'#F5FAF7'});
+  addRow('AR / ticket references',arRefs.length?String(arRefs.length)+' reference(s)':'No transaction references available',{fs:20,vfs:19,bg:'#F5FAF7'});
+  arRefs.forEach(r=>addRow('AR',/^\d+$/.test(r)?'AR '+r.padStart(7,'0'):r,{fs:20,vfs:20}));
   addGap();
 
   addSection('RECONCILIATION NOTE','#0C8B93');
