@@ -120,16 +120,21 @@ function buildDynamic(data){if(data.branch==='Alphaland'&&data.date==='2026-10-0
   s+=section(M,ly,C,'FOREX — PHP CASH','#2D8BD8');ly+=50;
   [['Opening PHP',money(php.opening)],['+ SELL cash-in',money(sells)],['− BUY cash-out',money(buys)],['− Forex-funded expense',money(Math.abs(Number(data.expenseDelta||0)))],['Expected closing',money(php.expected)],['Actual closing',money(php.closing)]].forEach((r,i)=>{s+=crow(M,ly,C,r[0],r[1],{bold:i===0||i>=4});ly+=42});
   const pv=Number(php.variance||0);s+=crow(M,ly,C,'PHP variance',money(pv),{bold:true,bg:Math.abs(pv)<.01?'#EAF8F1':'#FFF0EF',color:Math.abs(pv)<.01?'#08744D':'#B42318'});ly+=54;
-  s+=section(M,ly,C,'SCRATCH IT','#6754C5');ly+=50;
-  [['Opening cash',money(data.scratch?.opening)],['+ Sales',money(data.scratch?.sales)],['− Payouts',money(data.scratch?.payouts)],['Expected closing',money(data.scratch?.expectedClosing)],['Actual closing',money(data.scratch?.closing)]].forEach((r,i)=>{s+=crow(M,ly,C,r[0],r[1],{bold:i>=3});ly+=42});
-  const sv=Number(data.scratch?.variance||0);s+=crow(M,ly,C,'Scratch variance',sv<0?'SHORT '+money(Math.abs(sv)):sv>0?'OVER '+money(sv):'₱0.00',{bold:true,bg:sv===0?'#EAF8F1':'#FFF1D6',color:sv===0?'#08744D':'#9A6500'});ly+=42;
-  s+=crow(M,ly,C,'Gross profit',money(data.scratch?.grossProfit),{bold:true,bg:'#EAF8F1',color:'#08744D'});ly+=54;
+  if(data.branch!=='Solaire'){
+    s+=section(M,ly,C,'SCRATCH IT','#6754C5');ly+=50;
+    [['Opening cash',money(data.scratch?.opening)],['+ Sales',money(data.scratch?.sales)],['− Payouts',money(data.scratch?.payouts)],['Expected closing',money(data.scratch?.expectedClosing)],['Actual closing',money(data.scratch?.closing)]].forEach((r,i)=>{s+=crow(M,ly,C,r[0],r[1],{bold:i>=3});ly+=42});
+    const sv=Number(data.scratch?.variance||0);s+=crow(M,ly,C,'Scratch variance',sv<0?'SHORT '+money(Math.abs(sv)):sv>0?'OVER '+money(sv):'₱0.00',{bold:true,bg:sv===0?'#EAF8F1':'#FFF1D6',color:sv===0?'#08744D':'#9A6500'});ly+=42;
+    s+=crow(M,ly,C,'Gross profit',money(data.scratch?.grossProfit),{bold:true,bg:'#EAF8F1',color:'#08744D'});ly+=54;
+  }
   s+=section(M,ly,C,'HIVE','#6754C5');ly+=50;
   s+=crow(M,ly,C,'Opening cash count',money(data.controls?.hive?.opening));ly+=42;s+=crow(M,ly,C,'Closing cash count',money(data.controls?.hive?.closing));ly+=42;
   const hv=Number(data.controls?.hive?.closing||0)-Number(data.controls?.hive?.opening||0);s+=crow(M,ly,C,'Variance',money(hv),{bold:true,bg:Math.abs(hv)<.01?'#EAF8F1':'#FFF0EF',color:Math.abs(hv)<.01?'#08744D':'#B42318'});ly+=54;
   s+=section(M,ly,C,'PROFIT SUMMARY','#0C8B93');ly+=50;
-  const combined=Number(profit.grossProfit||0)+Number(data.scratch?.grossProfit||0);
-  s+=crow(M,ly,C,'Known Forex gross profit',money(profit.grossProfit),{bold:true});ly+=42;s+=crow(M,ly,C,'Scratch gross profit',money(data.scratch?.grossProfit));ly+=42;s+=crow(M,ly,C,'Combined gross profit',money(combined),{bold:true,bg:'#EAF8F1',color:'#08744D'});ly+=42;s+=crow(M,ly,C,'Less Forex expense',money(Math.abs(Number(data.expenseDelta||0))));ly+=42;
+  const scratchProfit=data.branch==='Solaire'?0:Number(data.scratch?.grossProfit||0);
+  const combined=Number(profit.grossProfit||0)+scratchProfit;
+  s+=crow(M,ly,C,'Known Forex gross profit',money(profit.grossProfit),{bold:true});ly+=42;
+  if(data.branch!=='Solaire'){s+=crow(M,ly,C,'Scratch gross profit',money(data.scratch?.grossProfit));ly+=42;}
+  s+=crow(M,ly,C,'Combined gross profit',money(combined),{bold:true,bg:'#EAF8F1',color:'#08744D'});ly+=42;s+=crow(M,ly,C,'Less Forex expense',money(Math.abs(Number(data.expenseDelta||0))));ly+=42;
   const net=combined+Number(data.expenseDelta||0);s+=crow(M,ly,C,'NET AFTER EXPENSE',money(net),{bold:true,bg:net<0?'#FFF0EF':'#EAF8F1',color:net<0?'#B42318':'#08744D'});ly+=42;s+=crow(M,ly,C,'Transactions checked',String(tx.length),{bold:true});ly+=54;
   s+=section(M+C+G,ry,C,'FOREX — CLOSING INVENTORY','#F29D49','#073B3A');ry+=50;
   (data.reconciliation?.currencies||[]).forEach(r=>{const v=Number(r.variance||0);s+=crow(M+C+G,ry,C,r.currency,Number(r.closing||0).toLocaleString('en-PH')+(Math.abs(v)<.01?' • matched':' • variance '+v),{bold:true,color:Math.abs(v)<.01?'#17211d':'#B42318'});ry+=42});
@@ -139,11 +144,14 @@ function buildDynamic(data){if(data.branch==='Alphaland'&&data.date==='2026-10-0
   s+=crow(M+C+G,ry,C,'KNOWN FOREX GROSS PROFIT',money(profit.grossProfit),{bold:true,bg:'#EAF8F1',color:'#08744D'});ry+=42;s+=crow(M+C+G,ry,C,'Less Forex-funded expense',money(Math.abs(Number(data.expenseDelta||0))));ry+=42;s+=crow(M+C+G,ry,C,'NET FOREX PROFIT',money(profit.netAfterExpense),{bold:true,bg:Number(profit.netAfterExpense||0)<0?'#FFF0EF':'#EAF8F1',color:Number(profit.netAfterExpense||0)<0?'#B42318':'#08744D'});ry+=54;
   s+=section(M+C+G,ry,C,'OTHER BALANCES','#B27A13');ry+=50;
   const o=data.opening?.totals||{},c=data.closing?.totals||{};
-  [['HIVE',o.HIVE,c.HIVE],['JuanPay',o.JuanPay,c.JuanPay],['Scratch',o.Scratch,c.Scratch],['LottoMatik Cash',o.LottoMatikCash,c.LottoMatikCash],['LottoMatik Wallet',o.LottoMatikWallet,c.LottoMatikWallet]].forEach(r=>{s+=crow(M+C+G,ry,C,r[0]+' opening',money(r[1]));ry+=42;s+=crow(M+C+G,ry,C,r[0]+' closing',money(r[2]),{bold:true});ry+=42});
+  const otherBalances=[['HIVE',o.HIVE,c.HIVE],['JuanPay',o.JuanPay,c.JuanPay]];
+  if(data.branch!=='Solaire') otherBalances.push(['Scratch',o.Scratch,c.Scratch]);
+  otherBalances.push(['LottoMatik Cash',o.LottoMatikCash,c.LottoMatikCash],['LottoMatik Wallet',o.LottoMatikWallet,c.LottoMatikWallet]);
+  otherBalances.forEach(r=>{s+=crow(M+C+G,ry,C,r[0]+' opening',money(r[1]));ry+=42;s+=crow(M+C+G,ry,C,r[0]+' closing',money(r[2]),{bold:true});ry+=42});
   ry+=10;s+=section(M+C+G,ry,C,'RECONCILIATION NOTE','#0C8B93');ry+=50;
   const note=(profit.byCurrency||[]).filter(x=>Number(x.unmatchedOpeningQty||0)>0).map(x=>x.currency+' '+Number(x.unmatchedOpeningQty).toLocaleString()+' sold from opening stock').join(' • ');
   s+=crow(M+C+G,ry,C,'Opening-stock cost basis',note||'None unmatched',{fs:15,vfs:15,bg:'#FFF7D9',color:'#8B6200'});ry+=54;
-  s+='<text x="'+(W/2)+'" y="'+(Math.max(ly,ry)+22)+'" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700" fill="#33443d">Source: live Audit data • Cash Count + Transactions + Scratch • '+esc(data.date)+'</text></svg>';
+  s+='<text x="'+(W/2)+'" y="'+(Math.max(ly,ry)+22)+'" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700" fill="#33443d">Source: live Audit data • Cash Count + Transactions'+(data.branch==='Solaire'?'':' + Scratch')+' • '+esc(data.date)+'</text></svg>';
   const H=Math.max(ly,ry)+52;return s.replace('height="1500" viewBox="0 0 1080 1500"','height="'+H+'" viewBox="0 0 1080 '+H+'"');
 }
 async function svgToPng(svg){const blob=new Blob([svg],{type:'image/svg+xml;charset=utf-8'}),url=URL.createObjectURL(blob),im=new Image();return await new Promise((ok,no)=>{im.onload=()=>{const c=document.createElement('canvas');const scale=1.6;c.width=Math.round(im.width*scale);c.height=Math.round(im.height*scale);const ctx=c.getContext('2d');ctx.scale(scale,scale);ctx.drawImage(im,0,0);URL.revokeObjectURL(url);ok(c.toDataURL('image/png'))};im.onerror=e=>{URL.revokeObjectURL(url);no(e)};im.src=url})}
