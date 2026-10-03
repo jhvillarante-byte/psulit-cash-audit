@@ -137,28 +137,6 @@ function buildDynamic(data){if(data.branch==='Alphaland'&&data.date==='2026-10-0
   s+=section(M+C+G,ry,C,'FOREX — PROFIT / INCOME','#1F9A68');ry+=50;
   (profit.byCurrency||[]).filter(x=>Math.abs(Number(x.knownProfit||0))>.005||Number(x.knownQty||0)>0).forEach(x=>{s+=crow(M+C+G,ry,C,x.currency+' known gross profit',money(x.knownProfit),{bold:true});ry+=42});
   s+=crow(M+C+G,ry,C,'KNOWN FOREX GROSS PROFIT',money(profit.grossProfit),{bold:true,bg:'#EAF8F1',color:'#08744D'});ry+=42;s+=crow(M+C+G,ry,C,'Less Forex-funded expense',money(Math.abs(Number(data.expenseDelta||0))));ry+=42;s+=crow(M+C+G,ry,C,'NET FOREX PROFIT',money(profit.netAfterExpense),{bold:true,bg:Number(profit.netAfterExpense||0)<0?'#FFF0EF':'#EAF8F1',color:Number(profit.netAfterExpense||0)<0?'#B42318':'#08744D'});ry+=54;
-  s+=section(M+C+G,ry,C,'SELL PROFIT BY CURRENCY','#0C8B93');ry+=50;
-  const sellCurrencies=[...new Set(tx.filter(t=>t.transaction_type==='SELL').map(t=>t.currency))];
-  const profitMap=Object.fromEntries((profit.byCurrency||[]).map(x=>[x.currency,x]));
-  sellCurrencies.forEach(ccy=>{
-    const p=profitMap[ccy]||{};
-    const soldQty=tx.filter(t=>t.transaction_type==='SELL'&&t.currency===ccy).reduce((a,t)=>a+Number(t.foreign_amount||0),0);
-    const realized=Number(p.knownProfit||0);
-    const openingQty=Number(p.unmatchedOpeningQty||0);
-    const label=ccy+' sold '+Number(soldQty||0).toLocaleString('en-PH');
-    let value=money(realized)+' realized';
-    if(openingQty>0) value+=' • '+Number(openingQty).toLocaleString('en-PH')+' opening-stock uncosted';
-    s+=crow(M+C+G,ry,C,label,value,{
-      bold:true,
-      bg:openingQty>0?'#FFF7D9':'#EAF8F1',
-      color:openingQty>0?'#8B6200':'#08744D',
-      fs:16,
-      vfs:14
-    });ry+=44;
-  });
-  s+=crow(M+C+G,ry,C,'Profit basis','Realized profit uses matched same-day BUY cost. Opening-stock sales are not assumed.',{
-    fs:14,vfs:13,bg:'#FFF7D9',color:'#7A4B00',vbold:false
-  });ry+=58;
   s+=section(M+C+G,ry,C,'OTHER BALANCES','#B27A13');ry+=50;
   const o=data.opening?.totals||{},c=data.closing?.totals||{};
   [['HIVE',o.HIVE,c.HIVE],['JuanPay',o.JuanPay,c.JuanPay],['Scratch',o.Scratch,c.Scratch],['LottoMatik Cash',o.LottoMatikCash,c.LottoMatikCash],['LottoMatik Wallet',o.LottoMatikWallet,c.LottoMatikWallet]].forEach(r=>{s+=crow(M+C+G,ry,C,r[0]+' opening',money(r[1]));ry+=42;s+=crow(M+C+G,ry,C,r[0]+' closing',money(r[2]),{bold:true});ry+=42});
