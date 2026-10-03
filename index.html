@@ -127,8 +127,12 @@ function buildDynamic(data){const isSolaire=String(data.branch||'').trim().toLow
     s+=crow(M,ly,C,'Gross profit',money(data.scratch?.grossProfit),{bold:true,bg:'#EAF8F1',color:'#08744D'});ly+=54;
   }
   s+=section(M,ly,C,'HIVE','#6754C5');ly+=50;
-  s+=crow(M,ly,C,'Opening cash count',money(data.controls?.hive?.opening));ly+=42;s+=crow(M,ly,C,'Closing cash count',money(data.controls?.hive?.closing));ly+=42;
-  const hv=Number(data.controls?.hive?.closing||0)-Number(data.controls?.hive?.opening||0);s+=crow(M,ly,C,'Variance',money(hv),{bold:true,bg:Math.abs(hv)<.01?'#EAF8F1':'#FFF0EF',color:Math.abs(hv)<.01?'#08744D':'#B42318'});ly+=54;
+  const hiveOpening=Number(data.controls?.hive?.opening||0),hiveClosing=Number(data.controls?.hive?.closing||0),hiveExpense=Number(data.controls?.hive?.expense||0),hiveExpected=Number(data.controls?.hive?.expected??(hiveOpening+hiveExpense)),hiveVariance=hiveClosing-hiveExpected;
+  s+=crow(M,ly,C,'Opening cash count',money(hiveOpening));ly+=42;
+  s+=crow(M,ly,C,'− Hive-funded expense',money(Math.abs(hiveExpense)));ly+=42;
+  s+=crow(M,ly,C,'Expected closing',money(hiveExpected),{bold:true});ly+=42;
+  s+=crow(M,ly,C,'Actual closing',money(hiveClosing),{bold:true});ly+=42;
+  s+=crow(M,ly,C,'Variance',money(hiveVariance),{bold:true,bg:Math.abs(hiveVariance)<.01?'#EAF8F1':'#FFF0EF',color:Math.abs(hiveVariance)<.01?'#08744D':'#B42318'});ly+=54;
   s+=section(M,ly,C,'PROFIT SUMMARY','#0C8B93');ly+=50;
   const scratchProfit=isSolaire?0:Number(data.scratch?.grossProfit||0);
   const combined=Number(profit.grossProfit||0)+scratchProfit;
