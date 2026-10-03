@@ -144,9 +144,10 @@ function buildDynamic(data){const isSolaire=String(data.branch||'').trim().toLow
   s+=crow(M+C+G,ry,C,'KNOWN FOREX GROSS PROFIT',money(profit.grossProfit),{bold:true,bg:'#EAF8F1',color:'#08744D'});ry+=42;s+=crow(M+C+G,ry,C,'Less Forex-funded expense',money(Math.abs(Number(data.expenseDelta||0))));ry+=42;s+=crow(M+C+G,ry,C,'NET FOREX PROFIT',money(profit.netAfterExpense),{bold:true,bg:Number(profit.netAfterExpense||0)<0?'#FFF0EF':'#EAF8F1',color:Number(profit.netAfterExpense||0)<0?'#B42318':'#08744D'});ry+=54;
   s+=section(M+C+G,ry,C,'OTHER BALANCES','#B27A13');ry+=50;
   const o=data.opening?.totals||{},c=data.closing?.totals||{};
-  const otherBalances=[['HIVE',o.HIVE,c.HIVE],['JuanPay',o.JuanPay,c.JuanPay]];
-  if(!isSolaire) otherBalances.push(['Scratch',o.Scratch,c.Scratch]);
-  otherBalances.push(['LottoMatik Cash',o.LottoMatikCash,c.LottoMatikCash],['LottoMatik Wallet',o.LottoMatikWallet,c.LottoMatikWallet]);
+  const otherBalances=[['HIVE',o.HIVE,c.HIVE]];
+  if(!isSolaire){
+    otherBalances.push(['JuanPay',o.JuanPay,c.JuanPay],['Scratch',o.Scratch,c.Scratch],['LottoMatik Cash',o.LottoMatikCash,c.LottoMatikCash],['LottoMatik Wallet',o.LottoMatikWallet,c.LottoMatikWallet]);
+  }
   otherBalances.forEach(r=>{s+=crow(M+C+G,ry,C,r[0]+' opening',money(r[1]));ry+=42;s+=crow(M+C+G,ry,C,r[0]+' closing',money(r[2]),{bold:true});ry+=42});
   ry+=10;s+=section(M+C+G,ry,C,'RECONCILIATION NOTE','#0C8B93');ry+=50;
   const note=(profit.byCurrency||[]).filter(x=>Number(x.unmatchedOpeningQty||0)>0).map(x=>x.currency+' '+Number(x.unmatchedOpeningQty).toLocaleString()+' sold from opening stock').join(' • ');
