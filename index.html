@@ -140,8 +140,29 @@ function buildDynamic(data){const isSolaire=String(data.branch||'').trim().toLow
   if(!isSolaire){s+=crow(M,ly,C,'Scratch gross profit',money(data.scratch?.grossProfit));ly+=42;}
   s+=crow(M,ly,C,'Combined gross profit',money(combined),{bold:true,bg:'#EAF8F1',color:'#08744D'});ly+=42;s+=crow(M,ly,C,'Less Forex expense',money(Math.abs(Number(data.expenseDelta||0))));ly+=42;
   const net=combined+Number(data.expenseDelta||0);s+=crow(M,ly,C,'NET AFTER EXPENSE',money(net),{bold:true,bg:net<0?'#FFF0EF':'#EAF8F1',color:net<0?'#B42318':'#08744D'});ly+=42;s+=crow(M,ly,C,'Transactions checked',String(tx.length),{bold:true});ly+=54;
-  s+=section(M+C+G,ry,C,'FOREX — CLOSING INVENTORY','#F29D49','#073B3A');ry+=50;
-  (data.reconciliation?.currencies||[]).forEach(r=>{const v=Number(r.variance||0);s+=crow(M+C+G,ry,C,r.currency,Number(r.closing||0).toLocaleString('en-PH')+(Math.abs(v)<.01?' • matched':' • variance '+v),{bold:true,color:Math.abs(v)<.01?'#17211d':'#B42318'});ry+=42});
+  s+=section(M+C+G,ry,C,'FOREX — INVENTORY CHECK','#F29D49','#073B3A');ry+=50;
+  const openingFx=data.opening?.totals||{}, closingFx=data.closing?.totals||{};
+  const fxCurrencies=[...new Set((data.reconciliation?.currencies||[]).map(x=>x.currency).concat(tx.map(t=>String(t.currency||'').toUpperCase())).filter(Boolean))];
+  fxCurrencies.forEach(ccy=>{
+    const opening=Number(openingFx[ccy]||0);
+    const actual=Number(closingFx[ccy]||0);
+    const ccyTx=tx.filter(t=>String(t.currency||'').toUpperCase()===ccy);
+    const buysC=ccyTx.filter(t=>String(t.transaction_type||'').toUpperCase()==='BUY');
+    const sellsC=ccyTx.filter(t=>String(t.transaction_type||'').toUpperCase()==='SELL');
+    const buyQty=buysC.reduce((a,t)=>a+Number(t.foreign_amount||0),0);
+    const sellQty=sellsC.reduce((a,t)=>a+Number(t.foreign_amount||0),0);
+    const expected=opening+buyQty-sellQty;
+    const diff=actual-expected;
+    const ref=(t)=>{const r=String(t.ref||t.reference||t.transaction_ref||'').trim();return r?( /^\\d+$/.test(r)?'AR '+r.padStart(7,'0'):r):''};
+    const buyRefs=buysC.map(ref).filter(Boolean);
+    const sellRefs=sellsC.map(ref).filter(Boolean);
+    s+=crow(M+C+G,ry,C,ccy+' — Opening',opening.toLocaleString('en-PH'),{bold:true});ry+=38;
+    if(buyQty||buyRefs.length){s+=crow(M+C+G,ry,C,'+ AR — BUY',buyQty.toLocaleString('en-PH')+(buyRefs.length?'  ['+buyRefs.join(', ')+']':''),{vfs:14});ry+=38;}
+    if(sellQty||sellRefs.length){s+=crow(M+C+G,ry,C,'− AR — SELL',sellQty.toLocaleString('en-PH')+(sellRefs.length?'  ['+sellRefs.join(', ')+']':''),{vfs:14});ry+=38;}
+    s+=crow(M+C+G,ry,C,'Expected closing',expected.toLocaleString('en-PH'),{bold:true,bg:'#F5FAF7'});ry+=38;
+    s+=crow(M+C+G,ry,C,'Actual closing',actual.toLocaleString('en-PH'),{bold:true});ry+=38;
+    s+=crow(M+C+G,ry,C,'CHECK',Math.abs(diff)<0.01?'✓ MATCHED':'✕ DIFFERENCE '+(diff>0?'+':'')+diff.toLocaleString('en-PH'),{bold:true,bg:Math.abs(diff)<0.01?'#EAF8F1':'#FFF0EF',color:Math.abs(diff)<0.01?'#08744D':'#B42318'});ry+=50;
+  });
   ry+=10;s+=crow(M+C+G,ry,C,'PHP equivalent',money(data.closing?.totals?.PHP||0),{bold:true,bg:'#EAF8F1',color:'#08744D'});ry+=54;
   s+=section(M+C+G,ry,C,'FOREX — PROFIT / INCOME','#1F9A68');ry+=50;
   const profitBasisComplete=profit.profitBasisComplete!==false;
