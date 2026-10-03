@@ -159,7 +159,11 @@ function buildDynamic(data){const isSolaire=String(data.branch||'').trim().toLow
     otherBalances.push(['JuanPay',o.JuanPay,c.JuanPay],['Scratch',o.Scratch,c.Scratch],['LottoMatik Cash',o.LottoMatikCash,c.LottoMatikCash],['LottoMatik Wallet',o.LottoMatikWallet,c.LottoMatikWallet]);
   }
   otherBalances.forEach(r=>{s+=crow(M+C+G,ry,C,r[0]+' opening',money(r[1]));ry+=42;s+=crow(M+C+G,ry,C,r[0]+' closing',money(r[2]),{bold:true});ry+=42});
-  ry+=10;s+=section(M+C+G,ry,C,'RECONCILIATION NOTE','#0C8B93');ry+=50;
+  ry+=10;s+=section(M+C+G,ry,C,'TRANSACTION REFERENCES','#0C8B93');ry+=50;
+  const arRefs=[...new Set(tx.map(t=>String(t.ref||t.reference||t.transaction_ref||'').trim()).filter(Boolean))];
+  const arText=arRefs.length?arRefs.map(r=>/^\\d+$/.test(r)?'AR '+r.padStart(7,'0'):r).join(' • '):'No transaction references available';
+  s+=crow(M+C+G,ry,C,'AR / ticket references',arText,{fs:14,vfs:14,bg:'#F5FAF7'});ry+=Math.max(54,Math.ceil(arText.length/42)*24);
+  s+=section(M+C+G,ry,C,'RECONCILIATION NOTE','#0C8B93');ry+=50;
   const note=(profit.byCurrency||[]).filter(x=>Number(x.unmatchedOpeningQty||0)>0).map(x=>x.currency+' '+Number(x.unmatchedOpeningQty).toLocaleString()+' sold from opening stock').join(' • ');
   s+=crow(M+C+G,ry,C,'Opening-stock cost basis',note||'None unmatched',{fs:15,vfs:15,bg:'#FFF7D9',color:'#8B6200'});ry+=54;
   s+='<text x="'+(W/2)+'" y="'+(Math.max(ly,ry)+22)+'" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700" fill="#33443d">Source: live Audit data • Cash Count + Transactions'+(isSolaire?'':' + Scratch')+' • '+esc(data.date)+'</text></svg>';
