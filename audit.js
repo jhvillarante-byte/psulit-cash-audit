@@ -1482,9 +1482,15 @@ function buildShiftSummary({
       `✅ All forex currencies reconciled. ${tickets.length} transactions checked.`
     );
 
-    lines.push(hiveAudit?.status === 'MATCH'
-      ? 'ℹ️ Scratch, JuanPay, Opex, and other funds are not yet fully reconciled.'
-      : 'ℹ️ Scratch, JuanPay, Hive, Opex, and other funds are not yet fully reconciled.');
+    if (branchConfig.name.toLowerCase() === 'solaire') {
+      lines.push(
+        'ℹ️ JuanPay, Opex, and other funds are not yet fully reconciled.'
+      );
+    } else {
+      lines.push(hiveAudit?.status === 'MATCH'
+        ? 'ℹ️ Scratch, JuanPay, Opex, and other funds are not yet fully reconciled.'
+        : 'ℹ️ Scratch, JuanPay, Hive, Opex, and other funds are not yet fully reconciled.');
+    }
 
     return lines.join(
       '\n'
