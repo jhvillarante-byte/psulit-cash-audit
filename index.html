@@ -144,7 +144,13 @@ function buildDynamic(data){const isSolaire=String(data.branch||'').trim().toLow
   (data.reconciliation?.currencies||[]).forEach(r=>{const v=Number(r.variance||0);s+=crow(M+C+G,ry,C,r.currency,Number(r.closing||0).toLocaleString('en-PH')+(Math.abs(v)<.01?' • matched':' • variance '+v),{bold:true,color:Math.abs(v)<.01?'#17211d':'#B42318'});ry+=42});
   ry+=10;s+=crow(M+C+G,ry,C,'PHP equivalent',money(data.closing?.totals?.PHP||0),{bold:true,bg:'#EAF8F1',color:'#08744D'});ry+=54;
   s+=section(M+C+G,ry,C,'FOREX — PROFIT / INCOME','#1F9A68');ry+=50;
-  (profit.byCurrency||[]).filter(x=>Math.abs(Number(x.knownProfit||0))>.005||Number(x.knownQty||0)>0).forEach(x=>{s+=crow(M+C+G,ry,C,x.currency+' known gross profit',money(x.knownProfit),{bold:true});ry+=42});
+  const profitBasisComplete=profit.profitBasisComplete!==false;
+  if(profitBasisComplete){
+    (profit.byCurrency||[]).filter(x=>Math.abs(Number(x.knownProfit||0))>.005||Number(x.knownQty||0)>0).forEach(x=>{s+=crow(M+C+G,ry,C,x.currency+' known gross profit',money(x.knownProfit),{bold:true});ry+=42});
+  }else{
+    s+=crow(M+C+G,ry,C,'Profit basis status','INCOMPLETE — opening stock sold',{fs:15,vfs:15,bg:'#FFF7D9',color:'#8B6200'});ry+=42;
+    s+=crow(M+C+G,ry,C,'Reported Forex gross profit',money(profit.grossProfit),{bold:true,bg:'#EAF8F1',color:'#08744D'});ry+=42;
+  }
   s+=crow(M+C+G,ry,C,'KNOWN FOREX GROSS PROFIT',money(profit.grossProfit),{bold:true,bg:'#EAF8F1',color:'#08744D'});ry+=42;s+=crow(M+C+G,ry,C,'Less Forex-funded expense',money(Math.abs(Number(data.expenseDelta||0))));ry+=42;s+=crow(M+C+G,ry,C,'NET FOREX PROFIT',money(profit.netAfterExpense),{bold:true,bg:Number(profit.netAfterExpense||0)<0?'#FFF0EF':'#EAF8F1',color:Number(profit.netAfterExpense||0)<0?'#B42318':'#08744D'});ry+=54;
   s+=section(M+C+G,ry,C,'OTHER BALANCES','#B27A13');ry+=50;
   const o=data.opening?.totals||{},c=data.closing?.totals||{};
