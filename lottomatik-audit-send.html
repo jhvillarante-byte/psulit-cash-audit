@@ -35,7 +35,7 @@ textarea{min-height:150px;resize:vertical;line-height:1.45}
   </header>
   <section class="card">
     <div class="topline"><strong>Telegram destination</strong><span class="pill">LottoMatik topic</span></div>
-    <p class="note">Sends to PSulit Alphaland → LottoMatik topic (topic ID 1191). This is separate from Cash Count &amp; Daily Audit. Select the report PNG, review the caption, and press Send.</p>
+    <p class="note">Sends to PSulit Alphaland → LottoMatik topic (topic ID 728). This is separate from Cash Count &amp; Daily Audit. Select the report PNG, review the caption, and press Send.</p>
     <label for="reportImage">Select the September audit report image (PNG)</label>
     <input id="reportImage" type="file" accept="image/png,.png">
     <img id="preview" alt="Selected audit report preview">
@@ -113,7 +113,7 @@ sendBtn.addEventListener('click',async()=>{
     const data=await r.json().catch(()=>({}));
     if(!r.ok || data.ok!==true)throw new Error(data.error||('HTTP '+r.status));
     const msgId=data.messageId;
-    const link=msgId?'\nTelegram message: https://t.me/c/4316052145/1191/'+msgId:'';
+    const link=msgId?'\nTelegram message: https://t.me/c/4316052145/728/'+msgId:'';
     setStatus('Report sent successfully to the PSulit Alphaland LottoMatik topic.'+link,false);
     sendBtn.textContent='Sent to LottoMatik Topic';
   }catch(e){
