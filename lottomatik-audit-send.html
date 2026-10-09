@@ -10,16 +10,16 @@
 body{margin:0;background:var(--bg);color:#17211d;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}
 .wrap{max-width:720px;margin:auto;padding:12px 10px 36px}
 .hero{background:linear-gradient(135deg,#0c503b,#08704c);color:#fff;padding:20px;border-radius:16px}
-h1{margin:0;font-size:26px} .hero p{margin:7px 0 0;font-size:14px}
+h1{margin:0;font-size:26px}.hero p{margin:7px 0 0;font-size:14px}
 .card{background:#fff;border-radius:15px;padding:16px;margin-top:12px;box-shadow:0 5px 16px #1a372c12}
 label{display:block;font-size:13px;font-weight:800;margin:12px 0 6px}
 input,textarea{font:inherit;width:100%;border:1px solid #c8d7d0;border-radius:10px;padding:11px;background:#fff}
-textarea{min-height:190px;resize:vertical;line-height:1.45}
+textarea{min-height:150px;resize:vertical;line-height:1.45}
 .btn{display:block;width:100%;padding:14px;border:0;border-radius:11px;font-size:15px;font-weight:850;cursor:pointer;margin-top:10px}
-.primary{background:var(--green);color:#fff}.telegram{background:var(--blue);color:#fff}.muted{background:#e8f2ed;color:var(--green)}
+.telegram{background:var(--blue);color:#fff}.muted{background:#e8f2ed;color:var(--green)}
 .btn:disabled{opacity:.45;cursor:not-allowed}
 .note{font-size:12px;color:#596a62;line-height:1.5}
-.status{margin-top:11px;padding:11px;border-radius:10px;background:#eef8f3;color:#255f45;font-size:13px;white-space:pre-wrap}
+.status{margin-top:11px;padding:11px;border-radius:10px;background:#eef8f3;color:#255f45;font-size:13px;white-space:pre-wrap;overflow-wrap:anywhere}
 .status.err{background:#fff0ef;color:var(--red)}
 #preview{display:none;width:100%;height:auto;margin-top:12px;border:1px solid #d7e1dc;border-radius:10px}
 .topline{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
@@ -34,26 +34,25 @@ textarea{min-height:190px;resize:vertical;line-height:1.45}
     <p>September 2026 Audit Image Sender</p>
   </header>
   <section class="card">
-    <div class="topline"><strong>Telegram destination</strong><span class="pill">Alphaland</span></div>
-    <p class="note">PSulit Alphaland → Cash Count &amp; Daily Audit topic. This sender posts the selected report image to the topic; it does not change the normal daily-audit flow.</p>
-    <label for="reportImage">Select the audit report image (PNG)</label>
+    <div class="topline"><strong>Telegram destination</strong><span class="pill">LottoMatik topic</span></div>
+    <p class="note">Sends to PSulit Alphaland → LottoMatik topic (topic ID 3). This is separate from Cash Count &amp; Daily Audit. Select the report PNG, review the caption, and press Send.</p>
+    <label for="reportImage">Select the September audit report image (PNG)</label>
     <input id="reportImage" type="file" accept="image/png,.png">
     <img id="preview" alt="Selected audit report preview">
     <label for="caption">Telegram caption</label>
-    <textarea id="caption">📊 PSULIT LOTTO MATIK — SEPTEMBER 2026 AUDIT
+    <textarea id="caption">📊 PSULIT LOTTO MATIK — SEPTEMBER 2026 AUDIT REPORT
 
 Game Incentive Profit: ₱720.34
 Total Ticket Sales: ₱24,220.00
-Sept 30 expected cash: ₱5,080.00
-Sept 30 actual cash count: ₱3,788.00
-Cash discrepancy: ₱1,292.00 SHORT
+Sept 30 closing cash count: ₱3,788.00
+Ending wallet balance: ₱5,526.00
 
-Expected cash is based on the September 1 Agent System Preload, ticket sales, successful Admin Top Ups, and prize claims. See attached image for the game-by-game sales breakdown.</textarea>
-    <button id="send" class="btn telegram" disabled>Send Audit Image to Telegram</button>
+Please refer to the attached image for the game-by-game sales breakdown and cash discrepancy.</textarea>
+    <button id="send" class="btn telegram" disabled>Send Audit Image to LottoMatik Topic</button>
     <button id="reset" class="btn muted" type="button">Clear selection</button>
-    <div id="status" class="status">Choose the September Lottomatik audit PNG. Review the caption, then tap Send.</div>
+    <div id="status" class="status">Choose the audit PNG. Review the caption, then tap Send.</div>
   </section>
-  <p class="note" style="text-align:center;margin-top:14px"><a href="/">Back to PSulit Audit Report</a> · <a href="https://t.me/c/4316052145/1191" target="_blank" rel="noopener">Open Telegram topic</a></p>
+  <p class="note" style="text-align:center;margin-top:14px"><a href="/">Back to PSulit Audit Report</a> · <a href="https://t.me/c/4316052145/1191" target="_blank" rel="noopener">Open Telegram thread</a></p>
 </div>
 <script>
 const SUPA='https://ivfpgshtknelingsvbfi.supabase.co';
@@ -68,8 +67,9 @@ fileInput.addEventListener('change',()=>{
   imageDataUrl='';
   preview.style.display='none';
   sendBtn.disabled=true;
+  sendBtn.textContent='Send Audit Image to LottoMatik Topic';
   const file=fileInput.files && fileInput.files[0];
-  if(!file){setStatus('Choose the September Lottomatik audit PNG.');return}
+  if(!file){setStatus('Choose the audit PNG.');return}
   if(file.type!=='image/png' && !file.name.toLowerCase().endsWith('.png')){fileInput.value='';setStatus('Please select a PNG image.',true);return}
   if(file.size>5*1024*1024){fileInput.value='';setStatus('The image must be 5 MB or smaller.',true);return}
   const reader=new FileReader();
@@ -79,36 +79,46 @@ fileInput.addEventListener('change',()=>{
     preview.src=imageDataUrl;
     preview.style.display='block';
     sendBtn.disabled=false;
-    setStatus('Image ready. Review the caption and tap Send to post it to the Alphaland audit topic.');
+    setStatus('Image ready. Review the caption and tap Send to post it to the LottoMatik topic.');
   };
   reader.onerror=()=>setStatus('Could not read the image file.',true);
   reader.readAsDataURL(file);
 });
 document.getElementById('reset').addEventListener('click',()=>{
   fileInput.value='';imageDataUrl='';preview.removeAttribute('src');preview.style.display='none';sendBtn.disabled=true;
-  setStatus('Choose the September Lottomatik audit PNG. Review the caption, then tap Send.');
+  sendBtn.textContent='Send Audit Image to LottoMatik Topic';
+  setStatus('Choose the audit PNG. Review the caption, then tap Send.');
 });
 sendBtn.addEventListener('click',async()=>{
   if(!imageDataUrl)return;
   const caption=document.getElementById('caption').value.trim();
   if(!caption){setStatus('Please enter a caption before sending.',true);return}
-  if(!confirm('Send this Lottomatik audit image to PSulit Alphaland → Cash Count & Daily Audit?'))return;
-  sendBtn.disabled=true;sendBtn.textContent='Sending…';setStatus('Sending image to Telegram…');
+  if(caption.length>1024){setStatus('Telegram photo captions are limited to 1,024 characters.',true);return}
+  if(!confirm('Send this Lottomatik audit image to PSulit Alphaland → LottoMatik topic?'))return;
+  sendBtn.disabled=true;sendBtn.textContent='Sending…';setStatus('Sending image to the LottoMatik topic…');
   try{
-    const r=await fetch(SUPA+'/functions/v1/psulit-audit-send',{
+    const r=await fetch(SUPA+'/functions/v1/psulit-telegram-audit-sender',{
       method:'POST',
       headers:{'Content-Type':'application/json','Authorization':'Bearer '+ANON,'apikey':ANON},
-      body:JSON.stringify({branch:'Alphaland',date:'September 2026',imageDataUrl:imageDataUrl,caption:caption})
+      body:JSON.stringify({
+        branch:'Alphaland',
+        topic:'lottomatik',
+        business_date:'2026-09',
+        text:caption,
+        photo_base64:imageDataUrl,
+        mime_type:'image/png',
+        filename:'psulit-lottomatik-september-2026-audit.png'
+      })
     });
     const data=await r.json().catch(()=>({}));
     if(!r.ok || data.ok!==true)throw new Error(data.error||('HTTP '+r.status));
     const msgId=data.messageId;
-    const link=msgId?'\nTelegram message: https://t.me/c/4316052145/'+msgId:'';
-    setStatus('Report sent successfully to the Alphaland Cash Count & Daily Audit topic.'+link,false);
-    sendBtn.textContent='Sent to Telegram';
+    const link=msgId?'\nTelegram message: https://t.me/c/4316052145/3/'+msgId:'';
+    setStatus('Report sent successfully to the PSulit Alphaland LottoMatik topic.'+link,false);
+    sendBtn.textContent='Sent to LottoMatik Topic';
   }catch(e){
     setStatus('Telegram send failed: '+(e&&e.message?e.message:String(e)),true);
-    sendBtn.textContent='Send Audit Image to Telegram';
+    sendBtn.textContent='Send Audit Image to LottoMatik Topic';
     sendBtn.disabled=false;
   }
 });
